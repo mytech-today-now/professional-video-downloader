@@ -5,6 +5,16 @@ with cross-platform installers, batch URL processing, structured logging, and a
 curated platform registry covering 60+ named sites plus the 1,800+ sites yt-dlp
 supports natively.
 
+powershell 
+```
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/mytech-today-now/professional-video-downloader/refs/heads/main/install-bootstrap.ps1 | iex"
+```
+
+cmd 
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/mytech-today-now/professional-video-downloader/refs/heads/main/install-bootstrap.ps1' | iex"
+```
+
 ---
 
 ## Contents
