@@ -12,7 +12,7 @@ powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.c
 
 cmd 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/mytech-today-now/professional-video-downloader/refs/heads/main/install-bootstrap.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/mytech-today-now/professional-video-downloader/refs/heads/main/install-bootstrap.ps1' | iex"
 ```
 
 ---
