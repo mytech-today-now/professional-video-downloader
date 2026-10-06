@@ -119,11 +119,13 @@ function Set-WebResponse {
     param(
         [Parameter(Mandatory)][string]$Uri,
         [string]$Body,
-        [string]$ContentType = 'text/plain; charset=utf-8'
+        [string]$ContentType = 'text/plain; charset=utf-8',
+        [int]$StatusCode = 200
     )
 
     $script:WebResponses[$Uri] = [pscustomobject]@{
         Response     = [pscustomobject]@{
+            StatusCode  = $StatusCode
             Content     = $Body
             Headers     = @{ 'Content-Type' = $ContentType }
             BaseResponse = [pscustomobject]@{ ContentType = $ContentType }
@@ -149,6 +151,7 @@ function Invoke-TestWebRequest {
     [CmdletBinding()]
     param(
         [string]$Uri,
+        [hashtable]$Headers,
         [switch]$UseBasicParsing,
         [int]$TimeoutSec,
         [int]$OperationTimeoutSeconds,
@@ -162,6 +165,26 @@ function Invoke-TestWebRequest {
     }
 
     $entry = $script:WebResponses[$Uri]
+    if ($Uri -eq 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest') {
+        if (-not $PSBoundParameters.ContainsKey('Headers') -or
+            $Headers['Accept'] -ne 'application/vnd.github+json' -or
+            $Headers['User-Agent'] -ne 'ProfessionalVideoDownloader') {
+            throw 'Latest-release request is missing the expected GitHub headers.'
+        }
+        if (-not $PSBoundParameters.ContainsKey('TimeoutSec') -or $TimeoutSec -ne 20 -or
+            -not $PSBoundParameters.ContainsKey('MaximumRedirection') -or $MaximumRedirection -ne 3) {
+            throw 'Latest-release request is missing the expected timeout or redirect limits.'
+        }
+        if ($entry.ThrowMessage) {
+            throw $entry.ThrowMessage
+        }
+
+        return [pscustomobject]@{
+            StatusCode = $entry.Response.StatusCode
+            Content    = $entry.Response.Content
+        }
+    }
+
     if (-not $PSBoundParameters.ContainsKey('OutFile')) {
         throw "Missing OutFile guard in batch-source fetch: $Uri"
     }
@@ -187,6 +210,7 @@ function global:Invoke-WebRequest {
     [CmdletBinding()]
     param(
         [string]$Uri,
+        [hashtable]$Headers,
         [switch]$UseBasicParsing,
         [int]$TimeoutSec,
         [int]$OperationTimeoutSeconds,
@@ -251,7 +275,14 @@ $downloaderHelperCode = Import-DownloaderFunctions -ScriptPath $mainScriptPath -
     'Build-YtDlpArgumentList',
     'Invoke-ExitPause',
     'Get-YtDlpVersionInfo',
-    'Assert-YtDlpMinimumVersion'
+    'Assert-YtDlpMinimumVersion',
+    'Get-YtDlpExecutablePath',
+    'Get-YtDlpVersionText',
+    'Get-YtDlpStableReleaseVersionInfo',
+    'Get-LatestStableYtDlpRelease',
+    'Get-YtDlpInstallOwner',
+    'Invoke-YtDlpOwnerUpdate',
+    'Invoke-YtDlpUpdatePreflight'
 )
 . ([scriptblock]::Create($downloaderHelperCode))
 
@@ -413,6 +444,337 @@ function Invoke-VersionGateScenario {
 
     $prerelease = Get-YtDlpVersionInfo -VersionText 'yt-dlp 2024.01.01-alpha'
     Assert-True ($prerelease.Suffix -eq '-alpha') 'Prerelease suffix should be preserved.'
+
+    $plainVersion = Get-YtDlpVersionInfo -VersionText '2026.08.19'
+    Assert-True ($plainVersion.CoreText -eq '2026.08.19') 'Plain yt-dlp version output should be accepted.'
+
+    $invalidRejected = $false
+    try {
+        $null = Get-YtDlpVersionInfo -VersionText 'warning: yt-dlp 2026.08.19 failed'
+    }
+    catch {
+        $invalidRejected = $true
+    }
+    Assert-True $invalidRejected 'Version parser should reject extra text around a version.'
+}
+
+function Assert-LatestStableReleaseRejected {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Body,
+        [Parameter(Mandatory)][string]$Scenario
+    )
+
+    $releaseUri = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest'
+    Clear-TestState
+    Set-WebResponse -Uri $releaseUri -Body $Body -ContentType 'application/json'
+    $rejected = $false
+    try {
+        $null = Get-LatestStableYtDlpRelease
+    }
+    catch {
+        $rejected = $_.Exception.Message -match 'Unable to retrieve and validate the latest stable yt-dlp release'
+    }
+
+    Assert-True $rejected ("Malformed {0} should fail closed." -f $Scenario)
+    Assert-True ($script:WebRequestCalls.Count -eq 1) ("{0} should use only the mocked GitHub release request." -f $Scenario)
+}
+
+function Invoke-LatestStableYtDlpReleaseScenarios {
+    $releaseUri = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest'
+    Clear-TestState
+    Set-WebResponse -Uri $releaseUri -Body '{"tag_name":"2026.08.19","draft":false,"prerelease":false}' -ContentType 'application/json'
+    $release = Get-LatestStableYtDlpRelease
+    Assert-True ($release.Tag -eq '2026.08.19') 'Latest stable release tag should be read from the GitHub response.'
+    Assert-True ($release.Version -eq [version]'2026.08.19') 'Latest stable release version should be parsed from its tag.'
+    Assert-True ($script:WebRequestCalls.Count -eq 1 -and $script:WebRequestCalls[0] -eq $releaseUri) 'Latest stable release lookup should call the official GitHub API once.'
+
+    Assert-LatestStableReleaseRejected -Body '' -Scenario 'empty release response'
+    Assert-LatestStableReleaseRejected -Body '{"tag_name":"2026.08.19","draft":false}' -Scenario 'release object missing prerelease metadata'
+    Assert-LatestStableReleaseRejected -Body '{"tag_name":' -Scenario 'malformed JSON release data'
+    Assert-LatestStableReleaseRejected -Body '{"tag_name":"2026.08.19-beta","draft":false,"prerelease":false}' -Scenario 'prerelease tag'
+    Assert-LatestStableReleaseRejected -Body '{"tag_name":"2026.13.40","draft":false,"prerelease":false}' -Scenario 'invalid calendar release tag'
+    Assert-LatestStableReleaseRejected -Body '{"tag_name":"2026.08.19","draft":false,"prerelease":true}' -Scenario 'prerelease release metadata'
+    Assert-LatestStableReleaseRejected -Body '{"tag_name":"2026.08.19","draft":true,"prerelease":false}' -Scenario 'draft release metadata'
+
+    Clear-TestState
+    Set-WebResponse -Uri $releaseUri -StatusCode 503 -Body '{"message":"temporarily unavailable"}' -ContentType 'application/json'
+    $httpFailureRejected = $false
+    try {
+        $null = Get-LatestStableYtDlpRelease
+    }
+    catch {
+        $httpFailureRejected = $_.Exception.Message -match 'GitHub returned HTTP status 503'
+    }
+    Assert-True $httpFailureRejected 'A non-success GitHub status should fail closed.'
+
+    Clear-TestState
+    Set-WebResponseError -Uri $releaseUri -Message 'GitHub is unavailable in this offline test.'
+    $networkFailureRejected = $false
+    try {
+        $null = Get-LatestStableYtDlpRelease
+    }
+    catch {
+        $networkFailureRejected = $_.Exception.Message -match 'Unable to retrieve and validate the latest stable yt-dlp release'
+    }
+    Assert-True $networkFailureRejected 'A GitHub request failure should fail closed.'
+}
+
+function New-YtDlpPreflightTestDependencies {
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [string]$Owner = 'winget',
+        [scriptblock]$UpdateAction
+    )
+
+    $versionReader = {
+        param($Path)
+        $State.VersionCalls++
+        $allowedPaths = @($State.ExecutablePath)
+        if ($State.ContainsKey('VerifiedExecutablePath')) {
+            $allowedPaths += $State.VerifiedExecutablePath
+        }
+        if ($Path -notin $allowedPaths) {
+            throw 'Preflight used a different executable path.'
+        }
+        return ('yt-dlp {0}' -f $State.Version)
+    }.GetNewClosure()
+    $releaseReader = {
+        [pscustomobject]@{ Tag = '2026.08.19' }
+    }
+    $ownerResolver = {
+        param($Path)
+        $allowedPaths = @($State.ExecutablePath)
+        if ($State.ContainsKey('VerifiedExecutablePath')) {
+            $allowedPaths += $State.VerifiedExecutablePath
+        }
+        if ($Path -notin $allowedPaths) {
+            throw 'Owner check used a different executable path.'
+        }
+        if ($State.ContainsKey('VerifiedExecutablePath') -and $Path -eq $State.VerifiedExecutablePath -and $State.ContainsKey('VerifiedOwner')) {
+            return $State.VerifiedOwner
+        }
+        return $Owner
+    }.GetNewClosure()
+    $executableResolver = {
+        if ($State.ContainsKey('VerifiedExecutablePath')) {
+            return $State.VerifiedExecutablePath
+        }
+        return $State.ExecutablePath
+    }.GetNewClosure()
+
+    if (-not $UpdateAction) {
+        $UpdateAction = {
+            param($DetectedOwner, $Path, $TargetVersion, $InstalledVersion)
+            $State.UpdateCalls++
+            if ($DetectedOwner -ne $Owner -or $Path -ne $State.ExecutablePath -or $TargetVersion -ne '2026.08.19' -or $InstalledVersion -ne '2026.01.01') {
+                throw 'Update action received incorrect owner, executable, or target version.'
+            }
+            $State.Version = $TargetVersion
+            return [pscustomobject]@{ ExitCode = 0 }
+        }.GetNewClosure()
+    }
+
+    return [pscustomobject]@{
+        VersionReader = $versionReader
+        ReleaseReader = $releaseReader
+        OwnerResolver = $ownerResolver
+        ExecutableResolver = $executableResolver
+        UpdateAction  = $UpdateAction
+    }
+}
+
+function Invoke-YtDlpUpdatePreflightScenarios {
+    $executablePath = Join-Path ([System.IO.Path]::GetTempPath()) 'fake-yt-dlp.exe'
+    $state = @{ ExecutablePath = $executablePath; Version = '2026.08.19'; VersionCalls = 0; UpdateCalls = 0 }
+    $dependencies = New-YtDlpPreflightTestDependencies -State $state
+    $current = Invoke-YtDlpUpdatePreflight -ExecutablePath $executablePath `
+        -VersionReader $dependencies.VersionReader `
+        -ReleaseReader $dependencies.ReleaseReader `
+        -OwnerResolver $dependencies.OwnerResolver `
+        -ExecutableResolver $dependencies.ExecutableResolver `
+        -UpdateAction $dependencies.UpdateAction
+    Assert-True (-not $current.Updated) 'Current stable yt-dlp should not be reinstalled.'
+    Assert-True ($current.ExecutablePath -eq $executablePath) 'Current result should preserve the resolved executable path.'
+    Assert-True ($state.UpdateCalls -eq 0) 'Current stable yt-dlp should not invoke an update.'
+    Assert-True ($state.VersionCalls -eq 1) 'Current stable yt-dlp should only be queried once.'
+
+    $updatedExecutablePath = Join-Path ([System.IO.Path]::GetTempPath()) 'updated-fake-yt-dlp.exe'
+    $state = @{ ExecutablePath = $executablePath; VerifiedExecutablePath = $updatedExecutablePath; Version = '2026.01.01'; VersionCalls = 0; UpdateCalls = 0 }
+    $dependencies = New-YtDlpPreflightTestDependencies -State $state
+    $updated = Invoke-YtDlpUpdatePreflight -ExecutablePath $executablePath `
+        -VersionReader $dependencies.VersionReader `
+        -ReleaseReader $dependencies.ReleaseReader `
+        -OwnerResolver $dependencies.OwnerResolver `
+        -ExecutableResolver $dependencies.ExecutableResolver `
+        -UpdateAction $dependencies.UpdateAction
+    Assert-True $updated.Updated 'Outdated yt-dlp should be updated.'
+    Assert-True ($updated.InstalledText -eq 'yt-dlp 2026.08.19') 'Verified updated version should be returned.'
+    Assert-True ($updated.ExecutablePath -eq $updatedExecutablePath) 'Update should return the refreshed executable path used for processing.'
+    Assert-True ($state.VersionCalls -eq 2) 'Updated yt-dlp should be queried before and after the update.'
+    Assert-True ($state.UpdateCalls -eq 1) 'Outdated yt-dlp should invoke one update.'
+
+    $state = @{ ExecutablePath = $executablePath; VerifiedExecutablePath = $updatedExecutablePath; VerifiedOwner = 'python'; Version = '2026.01.01'; VersionCalls = 0; UpdateCalls = 0 }
+    $dependencies = New-YtDlpPreflightTestDependencies -State $state
+    $changedOwnerRejected = $false
+    try {
+        $null = Invoke-YtDlpUpdatePreflight -ExecutablePath $executablePath `
+            -VersionReader $dependencies.VersionReader `
+            -ReleaseReader $dependencies.ReleaseReader `
+            -OwnerResolver $dependencies.OwnerResolver `
+            -ExecutableResolver $dependencies.ExecutableResolver `
+            -UpdateAction $dependencies.UpdateAction
+    }
+    catch {
+        $changedOwnerRejected = $_.Exception.Message -match 'instead of the original WinGet package'
+    }
+    Assert-True $changedOwnerRejected 'A refreshed executable from a different installation owner should stop preflight.'
+    Assert-True ($state.VersionCalls -eq 1) 'A refreshed executable from a different owner must not be run for verification.'
+
+    foreach ($newerVersion in @('2026.09.01', '2026.09.01-dev')) {
+        $state = @{ ExecutablePath = $executablePath; Version = $newerVersion; VersionCalls = 0; UpdateCalls = 0 }
+        $dependencies = New-YtDlpPreflightTestDependencies -State $state
+        $downgradeRejected = $false
+        try {
+            $null = Invoke-YtDlpUpdatePreflight -ExecutablePath $executablePath `
+                -VersionReader $dependencies.VersionReader `
+                -ReleaseReader $dependencies.ReleaseReader `
+                -OwnerResolver $dependencies.OwnerResolver `
+                -ExecutableResolver $dependencies.ExecutableResolver `
+                -UpdateAction $dependencies.UpdateAction
+        }
+        catch {
+            $downgradeRejected = $_.Exception.Message -match 'newer than the latest stable release'
+        }
+        Assert-True $downgradeRejected ("Newer installed version '{0}' should not be downgraded." -f $newerVersion)
+        Assert-True ($state.UpdateCalls -eq 0) 'A newer stable or prerelease build must not invoke an update.'
+    }
+
+    $state = @{ ExecutablePath = $executablePath; Version = 'invalid output'; VersionCalls = 0; UpdateCalls = 0 }
+    $releaseState = @{ Calls = 0 }
+    $dependencies = New-YtDlpPreflightTestDependencies -State $state
+    $invalidReleaseReader = { $releaseState.Calls++; [pscustomobject]@{ Tag = '2026.08.19' } }.GetNewClosure()
+    $invalidVersionRejected = $false
+    try {
+        $null = Invoke-YtDlpUpdatePreflight -ExecutablePath $executablePath `
+            -VersionReader $dependencies.VersionReader `
+            -ReleaseReader $invalidReleaseReader `
+            -OwnerResolver $dependencies.OwnerResolver `
+            -ExecutableResolver $dependencies.ExecutableResolver `
+            -UpdateAction $dependencies.UpdateAction
+    }
+    catch {
+        $invalidVersionRejected = $_.Exception.Message -match 'Unable to determine a valid version'
+    }
+    Assert-True $invalidVersionRejected 'Malformed yt-dlp version output should stop preflight.'
+    Assert-True ($releaseState.Calls -eq 0) 'A malformed installed version should stop before a release or update check.'
+    Assert-True ($state.UpdateCalls -eq 0) 'Malformed yt-dlp version output must not invoke an update.'
+
+    $state = @{ ExecutablePath = $executablePath; Version = '2026.01.01'; VersionCalls = 0; UpdateCalls = 0 }
+    $dependencies = New-YtDlpPreflightTestDependencies -State $state
+    $unavailableReleaseReader = { throw 'GitHub unavailable in offline test.' }
+    $releaseFailureRejected = $false
+    try {
+        $null = Invoke-YtDlpUpdatePreflight -ExecutablePath $executablePath `
+            -VersionReader $dependencies.VersionReader `
+            -ReleaseReader $unavailableReleaseReader `
+            -OwnerResolver $dependencies.OwnerResolver `
+            -ExecutableResolver $dependencies.ExecutableResolver `
+            -UpdateAction $dependencies.UpdateAction
+    }
+    catch {
+        $releaseFailureRejected = $_.Exception.Message -match 'Could not establish the latest stable yt-dlp version'
+    }
+    Assert-True $releaseFailureRejected 'Unavailable latest-release metadata should stop preflight.'
+    Assert-True ($state.UpdateCalls -eq 0) 'Release lookup failure must stop before an installation update.'
+
+    $workspace = New-TestWorkspace
+    try {
+        $state = @{ ExecutablePath = $executablePath; Version = '2026.01.01'; VersionCalls = 0; UpdateCalls = 0; Workspace = $workspace }
+        $failedUpdateAction = {
+            param($DetectedOwner, $Path, $TargetVersion, $InstalledVersion)
+            $State.UpdateCalls++
+            return [pscustomobject]@{ ExitCode = 5 }
+        }.GetNewClosure()
+        $dependencies = New-YtDlpPreflightTestDependencies -State $state -UpdateAction $failedUpdateAction
+        $installFailureRejected = $false
+        try {
+            $null = Invoke-YtDlpUpdatePreflight -ExecutablePath $executablePath `
+                -VersionReader $dependencies.VersionReader `
+                -ReleaseReader $dependencies.ReleaseReader `
+                -OwnerResolver $dependencies.OwnerResolver `
+                -ExecutableResolver $dependencies.ExecutableResolver `
+                -UpdateAction $dependencies.UpdateAction
+        }
+        catch {
+            $installFailureRejected = $_.Exception.Message -match 'exit code 5'
+        }
+        Assert-True $installFailureRejected 'A failed package update should stop preflight.'
+        Assert-True ($state.UpdateCalls -eq 1) 'A failed package update should be attempted once.'
+        Assert-True (@(Get-ChildItem -LiteralPath $workspace -Force).Count -eq 0) 'The updater should not leave temporary artifacts.'
+
+        $state = @{ ExecutablePath = $executablePath; Version = '2026.01.01'; VersionCalls = 0; UpdateCalls = 0 }
+        $permissionDeniedAction = {
+            param($DetectedOwner, $Path, $TargetVersion, $InstalledVersion)
+            $State.UpdateCalls++
+            throw 'Access is denied for this installation.'
+        }.GetNewClosure()
+        $dependencies = New-YtDlpPreflightTestDependencies -State $state -UpdateAction $permissionDeniedAction
+        $permissionFailureRejected = $false
+        try {
+            $null = Invoke-YtDlpUpdatePreflight -ExecutablePath $executablePath `
+                -VersionReader $dependencies.VersionReader `
+                -ReleaseReader $dependencies.ReleaseReader `
+                -OwnerResolver $dependencies.OwnerResolver `
+                -ExecutableResolver $dependencies.ExecutableResolver `
+                -UpdateAction $dependencies.UpdateAction
+        }
+        catch {
+            $permissionFailureRejected = $_.Exception.Message -match 'Access is denied'
+        }
+        Assert-True $permissionFailureRejected 'Permission-denied updates should stop with an actionable error.'
+        Assert-True ($state.UpdateCalls -eq 1) 'Permission denial should not be retried through another installation path.'
+
+        $state = @{ ExecutablePath = $executablePath; Version = '2026.01.01'; VersionCalls = 0; UpdateCalls = 0 }
+        $successWithoutReplacement = {
+            param($DetectedOwner, $Path, $TargetVersion, $InstalledVersion)
+            $State.UpdateCalls++
+            return [pscustomobject]@{ ExitCode = 0 }
+        }.GetNewClosure()
+        $dependencies = New-YtDlpPreflightTestDependencies -State $state -UpdateAction $successWithoutReplacement
+        $staleAfterUpdateRejected = $false
+        try {
+            $null = Invoke-YtDlpUpdatePreflight -ExecutablePath $executablePath `
+                -VersionReader $dependencies.VersionReader `
+                -ReleaseReader $dependencies.ReleaseReader `
+                -OwnerResolver $dependencies.OwnerResolver `
+                -ExecutableResolver $dependencies.ExecutableResolver `
+                -UpdateAction $dependencies.UpdateAction
+        }
+        catch {
+            $staleAfterUpdateRejected = $_.Exception.Message -match 'reports yt-dlp 2026\.01\.01'
+        }
+        Assert-True $staleAfterUpdateRejected 'A reported successful update must be verified against the effective executable.'
+
+        $state = @{ ExecutablePath = $executablePath; Version = '2026.01.01'; VersionCalls = 0; UpdateCalls = 0 }
+        $dependencies = New-YtDlpPreflightTestDependencies -State $state -Owner 'python'
+        $unsupportedOwnerRejected = $false
+        try {
+            $null = Invoke-YtDlpUpdatePreflight -ExecutablePath $executablePath `
+                -VersionReader $dependencies.VersionReader `
+                -ReleaseReader $dependencies.ReleaseReader `
+                -OwnerResolver $dependencies.OwnerResolver `
+                -ExecutableResolver $dependencies.ExecutableResolver `
+                -UpdateAction $dependencies.UpdateAction
+        }
+        catch {
+            $unsupportedOwnerRejected = $_.Exception.Message -match 'same package manager or Python interpreter'
+        }
+        Assert-True $unsupportedOwnerRejected 'An unsupported Python-owned installation should fail with same-interpreter guidance.'
+        Assert-True ($state.UpdateCalls -eq 0) 'An unsupported Python-owned installation must not run a package update.'
+    }
+    finally {
+        Remove-TestWorkspace -Path $workspace
+    }
 }
 
 function Invoke-ExitPauseScenario {
@@ -459,6 +821,11 @@ function Assert-StaticMetadata {
     Assert-True ($version -eq $headerVersion) "Main script header version '$headerVersion' does not match VERSION '$version'."
     Assert-True ($mainText -match [regex]::Escape('Get-ProjectVersion -RootPath $PSScriptRoot')) 'Main script does not read VERSION at runtime.'
     Assert-True ($mainText -match [regex]::Escape('Get-DownloaderStateRoot')) 'Main script does not resolve writable runtime state separately from the install root.'
+    Assert-True ($mainText -match [regex]::Escape('$Script:YtDlpExecutable = $ytDlpPreflight.ExecutablePath')) 'Main script does not use the executable path refreshed and verified by yt-dlp preflight.'
+    $preflightPosition = $mainText.IndexOf('Invoke-YtDlpUpdatePreflight -ExecutablePath')
+    $downloadPosition = $mainText.IndexOf('# --------------------- DOWNLOAD EXECUTION')
+    Assert-True ($preflightPosition -ge 0 -and $preflightPosition -lt $downloadPosition) 'yt-dlp preflight must run before the download execution section.'
+    Assert-True ($mainText -match [regex]::Escape('& $Script:YtDlpExecutable @Arguments')) 'Downloads do not use the executable resolved and verified by preflight.'
     Assert-True ($bootstrap -match [regex]::Escape('Get-ProjectVersion -RootPath $SourceDir')) 'Bootstrap does not read VERSION at runtime.'
     Assert-True ($batch -match [regex]::Escape('Professional Video Downloader v%APP_VERSION% - Setup')) 'Batch installer banner does not use the shared version placeholder.'
     Assert-True ($shell -match [regex]::Escape('Professional Video Downloader v${APP_VERSION} - Setup')) 'POSIX installer banner does not use the shared version placeholder.'
@@ -500,6 +867,14 @@ Describe 'Downloader helpers' {
 
     It 'covers yt-dlp version parsing and minimum version checks' {
         Invoke-VersionGateScenario
+    }
+
+    It 'validates GitHub latest stable release responses without network access' {
+        Invoke-LatestStableYtDlpReleaseScenarios
+    }
+
+    It 'covers the offline yt-dlp stable-release update preflight and failure boundaries' {
+        Invoke-YtDlpUpdatePreflightScenarios
     }
 
     It 'covers the opt-in exit pause gate' {

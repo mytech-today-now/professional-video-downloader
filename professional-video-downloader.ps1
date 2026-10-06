@@ -153,7 +153,7 @@ function Get-YtDlpVersionInfo {
         throw 'Unable to determine yt-dlp version from empty output.'
     }
 
-    $match = [regex]::Match($trimmed, '(?<!\d)(?<core>\d+(?:\.\d+){0,3})(?<suffix>.*)$')
+    $match = [regex]::Match($trimmed, '^\s*(?:yt-dlp(?:\s+version)?\s+)?(?<core>\d+(?:\.\d+){0,3})(?<suffix>[-+.]?[A-Za-z][A-Za-z0-9.-]*)?\s*$')
     if (-not $match.Success) {
         throw ("Unable to parse yt-dlp version from '{0}'." -f $trimmed)
     }
@@ -186,26 +186,311 @@ function Assert-YtDlpMinimumVersion {
         $versionInfo = Get-YtDlpVersionInfo -VersionText $InstalledVersionText
     }
     catch {
-        throw ("Unable to determine yt-dlp version from '{0}'. Update yt-dlp with the package manager or pip used to install it, or run 'yt-dlp -U' for standalone release binaries, then rerun the downloader." -f $InstalledVersionText)
+        throw ("Unable to determine yt-dlp version from '{0}'. Update yt-dlp through the same package manager or Python interpreter that installed it, then rerun the downloader." -f $InstalledVersionText)
     }
 
     if ($versionInfo.Version -lt $MinimumVersion -or ($versionInfo.Version -eq $MinimumVersion -and $versionInfo.Suffix)) {
-        throw ("yt-dlp {0} is too old. Minimum required is {1}. Update yt-dlp with the package manager or pip used to install it, or run 'yt-dlp -U' for standalone release binaries, then rerun the downloader." -f $versionInfo.Raw, $MinimumVersionText)
+        throw ("yt-dlp {0} is too old. Minimum required is {1}. Update it through the same package manager or Python interpreter that installed it, then rerun the downloader." -f $versionInfo.Raw, $MinimumVersionText)
     }
 
     return $versionInfo
 }
 
+function Get-YtDlpExecutablePath {
+    $command = Get-Command -Name 'yt-dlp' -ErrorAction SilentlyContinue
+    if (-not $command) {
+        throw 'yt-dlp was not found in PATH. Install it, then rerun the downloader.'
+    }
+    if ($command.CommandType -ne [System.Management.Automation.CommandTypes]::Application) {
+        throw ("yt-dlp resolves to a PowerShell {0}, so its executable cannot be identified safely. Remove the shadowing command or expose the intended yt-dlp executable in PATH, then rerun." -f $command.CommandType)
+    }
+    if ([string]::IsNullOrWhiteSpace($command.Source)) {
+        throw 'The yt-dlp command resolved without an executable path. Restore a normal executable in PATH, then rerun.'
+    }
+
+    return $command.Source
+}
+
 function Get-YtDlpVersionText {
+    param([Parameter(Mandatory)][string]$ExecutablePath)
+
     try {
-        $versionText = & yt-dlp --version 2>$null | Select-Object -First 1
-        if ($versionText) {
-            return $versionText.ToString().Trim()
+        $output = @(& $ExecutablePath --version 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        throw ("Could not run the yt-dlp version check for the resolved executable. {0}" -f $_.Exception.Message)
+    }
+
+    if ($exitCode -ne 0) {
+        throw ("The yt-dlp executable did not return a version successfully (exit code {0}). Check that executable's permissions and runtime requirements, then rerun." -f $exitCode)
+    }
+
+    $versionText = $output | Where-Object { -not [string]::IsNullOrWhiteSpace($_.ToString()) } | Select-Object -First 1
+    if (-not $versionText) {
+        throw 'The yt-dlp executable returned no version text. Restore or reinstall it through its owner, then rerun.'
+    }
+
+    return $versionText.ToString().Trim()
+}
+
+function Get-YtDlpStableReleaseVersionInfo {
+    param([Parameter(Mandatory)][string]$ReleaseTag)
+
+    $match = [regex]::Match($ReleaseTag, '^(?<date>\d{4}\.\d{2}\.\d{2})(?:\.(?<revision>\d+))?$')
+    if (-not $match.Success) {
+        throw 'GitHub returned a release tag that is not a stable yt-dlp version.'
+    }
+
+    $releaseDate = [datetime]::MinValue
+    $dateParsed = [datetime]::TryParseExact(
+        $match.Groups['date'].Value,
+        'yyyy.MM.dd',
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::None,
+        [ref]$releaseDate
+    )
+    if (-not $dateParsed) {
+        throw 'GitHub returned a yt-dlp release tag with an invalid calendar date.'
+    }
+
+    $versionInfo = Get-YtDlpVersionInfo -VersionText $ReleaseTag
+    if ($versionInfo.Suffix) {
+        throw 'GitHub returned a release tag with a prerelease suffix.'
+    }
+
+    return $versionInfo
+}
+
+function Get-LatestStableYtDlpRelease {
+    $releaseUri = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest'
+    try {
+        $originalSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = $originalSecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            $response = Invoke-WebRequest -Uri $releaseUri -UseBasicParsing -TimeoutSec 20 -MaximumRedirection 3 -Headers @{
+                Accept = 'application/vnd.github+json'
+                'User-Agent' = 'ProfessionalVideoDownloader'
+            } -ErrorAction Stop
+        }
+        finally {
+            [Net.ServicePointManager]::SecurityProtocol = $originalSecurityProtocol
+        }
+        if ($null -eq $response) {
+            throw 'GitHub returned no response object.'
+        }
+
+        $statusProperty = $response.PSObject.Properties['StatusCode']
+        $contentProperty = $response.PSObject.Properties['Content']
+        if (-not $statusProperty -or -not $contentProperty -or $statusProperty.Value -isnot [int] -or $contentProperty.Value -isnot [string]) {
+            throw 'GitHub returned a malformed HTTP response.'
+        }
+        if ($statusProperty.Value -ne 200) {
+            throw ("GitHub returned HTTP status {0}." -f $statusProperty.Value)
+        }
+
+        $content = $contentProperty.Value
+        if (-not $content -or $content.Length -gt 1MB) {
+            throw 'GitHub returned an empty or unexpectedly large release response.'
+        }
+        $release = $content | ConvertFrom-Json -ErrorAction Stop
+
+        if ($null -eq $release -or $release -is [System.Array] -or $release -is [string]) {
+            throw 'GitHub returned release data that was not a JSON object.'
+        }
+        $tagProperty = $release.PSObject.Properties['tag_name']
+        $draftProperty = $release.PSObject.Properties['draft']
+        $prereleaseProperty = $release.PSObject.Properties['prerelease']
+        if (-not $tagProperty -or -not $draftProperty -or -not $prereleaseProperty) {
+            throw 'GitHub release data is missing tag_name, draft, or prerelease.'
+        }
+        if ($tagProperty.Value -isnot [string] -or $draftProperty.Value -isnot [bool] -or $prereleaseProperty.Value -isnot [bool]) {
+            throw 'GitHub release data has invalid tag_name, draft, or prerelease types.'
+        }
+        if ($draftProperty.Value -or $prereleaseProperty.Value) {
+            throw 'GitHub latest release endpoint returned a draft or prerelease.'
+        }
+
+        $tag = $tagProperty.Value
+        $versionInfo = Get-YtDlpStableReleaseVersionInfo -ReleaseTag $tag
+
+        return [pscustomobject]@{
+            Tag     = $tag
+            Version = $versionInfo.Version
+        }
+    }
+    catch {
+        throw ("Unable to retrieve and validate the latest stable yt-dlp release from GitHub. Check network access and rerun. {0}" -f $_.Exception.Message)
+    }
+}
+
+function Get-YtDlpInstallOwner {
+    param([Parameter(Mandatory)][string]$ExecutablePath)
+
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT -or [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return 'unknown'
+    }
+
+    try {
+        $resolvedPath = [System.IO.Path]::GetFullPath($ExecutablePath)
+        $wingetLinkPath = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\yt-dlp.exe'))
+        if ([string]::Equals($resolvedPath, $wingetLinkPath, [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $wingetLinkPath)) {
+            $linkItem = Get-Item -LiteralPath $wingetLinkPath -Force -ErrorAction Stop
+            if (($linkItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return 'winget'
+            }
         }
     }
     catch {}
 
     return 'unknown'
+}
+
+function Invoke-YtDlpOwnerUpdate {
+    param(
+        [Parameter(Mandatory)][string]$Owner,
+        [Parameter(Mandatory)][string]$ExecutablePath,
+        [Parameter(Mandatory)][string]$ExpectedVersion,
+        [Parameter(Mandatory)][string]$InstalledVersion
+    )
+
+    if ($Owner -ne 'winget') {
+        throw 'This yt-dlp installation owner is not supported for automatic updates.'
+    }
+    if ((Get-YtDlpInstallOwner -ExecutablePath $ExecutablePath) -ne $Owner) {
+        throw 'The resolved yt-dlp executable no longer matches the WinGet links path. No update was attempted.'
+    }
+
+    $winget = Get-Command -Name 'winget' -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $winget -or [string]::IsNullOrWhiteSpace($winget.Source)) {
+        throw 'The executable is in the WinGet links directory, but WinGet is unavailable. Restore WinGet, then rerun.'
+    }
+
+    $listOutput = @(& $winget.Source list --id 'yt-dlp.yt-dlp' --exact --source 'winget' --disable-interactivity 2>&1)
+    $listExitCode = $LASTEXITCODE
+    if ($listExitCode -ne 0 -or (($listOutput -join "`n") -notmatch '(?i)yt-dlp\.yt-dlp')) {
+        throw 'WinGet did not confirm the installed yt-dlp package. No update was attempted. Repair or reinstall yt-dlp with WinGet, then rerun.'
+    }
+
+    Write-Colored ("Updating yt-dlp {0} to latest stable {1} through WinGet..." -f $InstalledVersion, $ExpectedVersion) -Color $ColorInfo
+    Write-Log -Message 'yt-dlp update started' -Context @{
+        version = $InstalledVersion
+        target  = $ExpectedVersion
+        owner   = $Owner
+    }
+
+    $arguments = @(
+        'upgrade', '--id', 'yt-dlp.yt-dlp', '--exact', '--version', $ExpectedVersion,
+        '--source', 'winget', '--scope', 'user', '--silent',
+        '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity'
+    )
+    $null = @(& $winget.Source @arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+    }
+}
+
+function Invoke-YtDlpUpdatePreflight {
+    param(
+        [Parameter(Mandatory)][string]$ExecutablePath,
+        [scriptblock]$VersionReader,
+        [scriptblock]$ReleaseReader,
+        [scriptblock]$OwnerResolver,
+        [scriptblock]$ExecutableResolver,
+        [scriptblock]$UpdateAction
+    )
+
+    if (-not $VersionReader) {
+        $VersionReader = { param($Path) Get-YtDlpVersionText -ExecutablePath $Path }
+    }
+    if (-not $ReleaseReader) {
+        $ReleaseReader = { Get-LatestStableYtDlpRelease }
+    }
+    if (-not $OwnerResolver) {
+        $OwnerResolver = { param($Path) Get-YtDlpInstallOwner -ExecutablePath $Path }
+    }
+    if (-not $ExecutableResolver) {
+        $ExecutableResolver = { Get-YtDlpExecutablePath }
+    }
+    if (-not $UpdateAction) {
+        $UpdateAction = { param($DetectedOwner, $Path, $TargetVersion, $InstalledVersion) Invoke-YtDlpOwnerUpdate -Owner $DetectedOwner -ExecutablePath $Path -ExpectedVersion $TargetVersion -InstalledVersion $InstalledVersion }
+    }
+
+    try {
+        $installedText = [string](& $VersionReader $ExecutablePath)
+        $installedInfo = Get-YtDlpVersionInfo -VersionText $installedText
+    }
+    catch {
+        throw ("Unable to determine a valid version from the yt-dlp executable at '{0}'. Media processing has been stopped. Restore or update that executable through its installation owner, then rerun. {1}" -f $ExecutablePath, $_.Exception.Message)
+    }
+
+    try {
+        $release = & $ReleaseReader
+        $targetTag = [string]$release.Tag
+        $targetInfo = Get-YtDlpStableReleaseVersionInfo -ReleaseTag $targetTag
+    }
+    catch {
+        throw ("Could not establish the latest stable yt-dlp version. Media processing has been stopped. {0}" -f $_.Exception.Message)
+    }
+
+    if (-not $installedInfo.Suffix -and $installedInfo.CoreText -eq $targetTag) {
+        return [pscustomobject]@{
+            ExecutablePath = $ExecutablePath
+            InstalledText = $installedInfo.Raw
+            TargetVersion = $targetTag
+            Owner         = 'current'
+            Updated       = $false
+        }
+    }
+
+    if ($installedInfo.Version -gt $targetInfo.Version) {
+        throw ("Installed yt-dlp {0} is newer than the latest stable release {1}. The downloader will not replace a newer or custom build automatically. Install the stable release through its owner, then rerun." -f $installedInfo.CoreText, $targetTag)
+    }
+
+    $owner = [string](& $OwnerResolver $ExecutablePath)
+    if ($owner -ne 'winget') {
+        throw ("yt-dlp {0} at '{1}' is behind latest stable {2}, but this script could not identify its installation owner or Python interpreter. No update or download was attempted. Use the same package manager or Python interpreter that installed it. On Windows, use 'winget upgrade --id yt-dlp.yt-dlp --exact --version {2}' only for WinGet installs, or 'choco upgrade yt-dlp -y' only for Chocolatey installs. On POSIX, use the installing package manager's documented update command. For pip installs, use the same interpreter that created this command with '-m pip install --upgrade yt-dlp'. Do not substitute another Python interpreter." -f $installedInfo.CoreText, $ExecutablePath, $targetTag)
+    }
+
+    try {
+        $updateResult = & $UpdateAction $owner $ExecutablePath $targetTag $installedInfo.CoreText
+    }
+    catch {
+        throw ("WinGet could not update yt-dlp {0} to latest stable {1}. Media processing has been stopped. Check WinGet availability, source data, and write permissions, then rerun. {2}" -f $installedInfo.CoreText, $targetTag, $_.Exception.Message)
+    }
+    if (-not $updateResult -or [int]$updateResult.ExitCode -ne 0) {
+        $updateExitCode = if ($updateResult) { [int]$updateResult.ExitCode } else { -1 }
+        throw ("WinGet could not update yt-dlp {0} to latest stable {1} (exit code {2}). Media processing has been stopped. Run 'winget upgrade --id yt-dlp.yt-dlp --exact --version {1}' and rerun." -f $installedInfo.CoreText, $targetTag, $updateExitCode)
+    }
+
+    try {
+        $verifiedExecutablePath = [string](& $ExecutableResolver)
+        if ([string]::IsNullOrWhiteSpace($verifiedExecutablePath)) {
+            throw 'No yt-dlp executable was found after the WinGet update.'
+        }
+        $verifiedOwner = [string](& $OwnerResolver $verifiedExecutablePath)
+        if ($verifiedOwner -ne $owner) {
+            throw ("After the WinGet update, yt-dlp resolved to '{0}' with owner '{1}' instead of the original WinGet package." -f $verifiedExecutablePath, $verifiedOwner)
+        }
+        $verifiedText = [string](& $VersionReader $verifiedExecutablePath)
+        $verifiedInfo = Get-YtDlpVersionInfo -VersionText $verifiedText
+    }
+    catch {
+        throw ("WinGet reported an update, but the refreshed WinGet yt-dlp executable could not be resolved and verified. Media processing has been stopped. Restore the package through WinGet and rerun. {0}" -f $_.Exception.Message)
+    }
+    if ($verifiedInfo.Suffix -or $verifiedInfo.CoreText -ne $targetTag) {
+        throw ("WinGet reported an update to yt-dlp {0}, but the executable used by the downloader reports {1}. Media processing has been stopped. Run 'winget upgrade --id yt-dlp.yt-dlp --exact --version {0}' and rerun." -f $targetTag, $verifiedInfo.Raw)
+    }
+
+    return [pscustomobject]@{
+        ExecutablePath = $verifiedExecutablePath
+        InstalledText = $verifiedInfo.Raw
+        TargetVersion = $targetTag
+        Owner         = $owner
+        Updated       = $true
+    }
 }
 
 function Get-HomeDirectory {
@@ -269,8 +554,9 @@ function Get-DownloaderStateRoot {
 }
 
 $ScriptVersion = Get-ProjectVersion -RootPath $PSScriptRoot
-$MinYtDlpVersion = [version]'2026.08.19'
-$MinYtDlpVersionText = '2026.08.19'
+$MinYtDlpVersion = [version]'2024.01.01'
+$MinYtDlpVersionText = '2024.01.01'
+$Script:YtDlpExecutable = $null
 # Default browser fingerprint used by -Impersonate and by the Cloudflare auto-retry.
 # Requires a recent yt-dlp with curl_cffi (bundled in modern builds).
 $DefaultImpersonateTarget = "chrome"
@@ -906,7 +1192,7 @@ function Invoke-YtDlpDownload {
     $retryExtractorArgs = $null
     $cloudflareDetected = $false
 
-    & yt-dlp @Arguments 2>&1 | ForEach-Object {
+    & $Script:YtDlpExecutable @Arguments 2>&1 | ForEach-Object {
         $line = $_.ToString().Trim()
         Write-Host $line
 
@@ -1016,6 +1302,39 @@ Write-Colored "          X/Twitter, Reddit, Bilibili, Rumble, Odysee, Snapchat, 
 Write-Colored "  Audio : SoundCloud, Bandcamp, Vevo  |  News: BBC, CNN, NBC, ABC, CBS, NYT" -Color $ColorMuted
 Write-Colored "  Other : TED, Pinterest, LinkedIn, VK, Rutube, Imgur, Tumblr, 9GAG, +adult" -Color $ColorMuted
 Write-Colored "  DRM   : Netflix, Disney+, Hulu, Prime, Paramount+, Apple TV+ (cannot decrypt)`n" -Color $ColorMuted
+
+# --------------------- YT-DLP UPDATE PREFLIGHT ---------------------
+try {
+    Write-Colored 'Checking yt-dlp against the latest stable release...' -Color $ColorInfo
+    $Script:YtDlpExecutable = Get-YtDlpExecutablePath
+    $ytDlpPreflight = Invoke-YtDlpUpdatePreflight -ExecutablePath $Script:YtDlpExecutable
+    $Script:YtDlpExecutable = $ytDlpPreflight.ExecutablePath
+    $null = Assert-YtDlpMinimumVersion -InstalledVersionText $ytDlpPreflight.InstalledText -MinimumVersion $MinYtDlpVersion
+
+    if ($ytDlpPreflight.Updated) {
+        Write-Colored ("Updated yt-dlp to latest stable {0} through WinGet. Processing will use the verified executable." -f $ytDlpPreflight.TargetVersion) -Color $ColorSuccess
+        Write-Log -Message 'yt-dlp updated to latest stable' -Context @{
+            version = $ytDlpPreflight.InstalledText
+            target  = $ytDlpPreflight.TargetVersion
+            owner   = $ytDlpPreflight.Owner
+        }
+    }
+    else {
+        Write-Colored ("yt-dlp is current at latest stable {0}." -f $ytDlpPreflight.TargetVersion) -Color $ColorSuccess
+        Write-Log -Message 'yt-dlp is current at latest stable' -Context @{
+            version = $ytDlpPreflight.InstalledText
+            target  = $ytDlpPreflight.TargetVersion
+        }
+    }
+}
+catch {
+    $preflightError = $_.Exception.Message
+    Write-Colored ("ERROR: yt-dlp preflight failed. Media processing will not start. {0}" -f $preflightError) -Color $ColorError
+    Write-Log -Level 'ERROR' -Message 'yt-dlp update preflight failed' -Context @{ error = $preflightError }
+    $global:LASTEXITCODE = 1
+    Invoke-ExitPause -Seconds 6
+    exit 1
+}
 
 # --------------------- DOWNLOAD PATH MANAGEMENT ---------------------
 $persistResolvedDownloadPath = $false
@@ -1179,31 +1498,6 @@ if ($urlList.Count -eq 0) {
 }
 
 Write-Colored "Queued $($urlList.Count) URL(s) for download." -Color $ColorInfo
-
-# --------------------- CHECK FOR YT-DLP ---------------------
-if (-not (Get-Command "yt-dlp" -ErrorAction SilentlyContinue)) {
-    Write-Colored "ERROR: yt-dlp not found in PATH." -Color $ColorError
-    Write-Colored "`nInstall with:" -Color $ColorWarning
-    Write-Colored "   winget install yt-dlp" -Color $ColorInfo
-    Write-Colored "Then restart PowerShell and try again." -Color $ColorInfo
-    Invoke-ExitPause -Seconds 6
-    exit 1
-}
-
-$ytDlpVersionText = Get-YtDlpVersionText
-try {
-    $null = Assert-YtDlpMinimumVersion -InstalledVersionText $ytDlpVersionText -MinimumVersion $MinYtDlpVersion
-}
-catch {
-    Write-Colored ("ERROR: {0}" -f $_.Exception.Message) -Color $ColorError
-    Write-Log -Level 'ERROR' -Message 'yt-dlp version gate failed' -Context @{
-        version = $ytDlpVersionText
-        minimum = $MinYtDlpVersionText
-    }
-    $global:LASTEXITCODE = 1
-    Invoke-ExitPause -Seconds 6
-    exit 1
-}
 
 # --------------------- DOWNLOAD EXECUTION ---------------------
 $downloadTemplate = Join-Path $DownloadPath "%(title)s [%(id)s].%(ext)s"

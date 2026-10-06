@@ -129,7 +129,7 @@ via `-Url`, and queued.
 | `-CookiesFromBrowser <b>` | Reuse an existing browser session for login-gated content. `<b>`: `chrome`, `chromium`, `edge`, `firefox`, `brave`, `opera`, `vivaldi`, `safari`. |
 | `-Impersonate`            | Enable browser TLS impersonation from the first attempt (Cloudflare-protected sites). Requires recent yt-dlp with `curl_cffi`. |
 | `-PauseOnExit`            | Opt in to the legacy 4-second exit pause for interactive console use. |
-| `-DownloadPath <path>`    | Override the configured output directory for this invocation.                   |
+| `-DownloadPath <path>`    | Override the system Downloads folder for this invocation only.                  |
 
 ### Examples
 
@@ -154,19 +154,41 @@ via `-Url`, and queued.
 
 ## Output & Logging
 
-- **Downloads** go to the configured output directory (see
-  `VideoDownloaderConfig.json`, prompted on first run; overridable via
-  `-DownloadPath`). If the system Downloads folder is unavailable, the script
-  falls back to a predictable `Professional Video Downloader\Downloads` folder
-  under your profile and records that effective path for the next run.
-- **Logs and config** live in the user-writable app state directory. On Windows
-  that is `%LOCALAPPDATA%\myTech.Today\professional-video-downloader\`; on macOS
-  and Linux the script uses the matching user data or state directory. The
-  download preference is stored in `VideoDownloaderConfig.json` and logs roll
-  daily under `logs/YYYY-MM-DD.log` in that same root. Legacy configs beside the
-  script are read and migrated into the new location on first run when found.
+- **Downloads** go to the current user's system Downloads folder. Windows uses
+  the Windows Downloads known folder, macOS uses its system Downloads folder,
+  and Linux follows `xdg-user-dir DOWNLOAD` or the user's XDG directory config.
+  The folder is created when needed. `-DownloadPath` overrides it for one run.
+- **Logs** live in the user-writable app state directory. On Windows that is
+  `%LOCALAPPDATA%\myTech.Today\professional-video-downloader\`; on macOS and
+  Linux the script uses the matching user data or state directory. Logs roll
+  daily under `logs/YYYY-MM-DD.log` in that root.
 - **Progress** is shown live via `Write-Progress`; a summary table
   (success / failure / per-URL status) is printed when the batch completes.
+
+---
+
+## yt-dlp Update Check
+
+Before processing URLs, the downloader checks the official GitHub latest stable
+release and verifies the version reported by the exact executable it will use.
+The response must contain a valid dated yt-dlp release tag and explicit draft
+and prerelease flags. It does not reinstall an already current stable release
+or downgrade a version newer than the advertised release. On Windows, an outdated
+installation is updated only when the executable resolves through the user's
+WinGet links directory and WinGet confirms the `yt-dlp.yt-dlp` package. The
+downloader requests that exact stable version and verifies the same executable
+path again before continuing.
+
+The updater does not replace Chocolatey, pip, virtual environment, or POSIX
+package-manager installations with a different distribution. If an outdated
+installation has another or unknown owner, the downloader stops before media
+processing. Update yt-dlp with the same package manager or Python interpreter
+that installed it, then rerun. The downloader does not upgrade Python. This
+avoids changing a Python runtime shared by other applications.
+
+The release check requires HTTPS access to the GitHub API on every invocation.
+If that check, the owner update, or post-update verification fails, the
+downloader stops and reports the reason instead of using an older executable.
 
 ---
 
@@ -190,10 +212,10 @@ To enable verbose diagnostics, append `-Verbose` to any invocation.
 | Tool        | Minimum     | Purpose                                            |
 | ----------- | ----------- | -------------------------------------------------- |
 | PowerShell  | 5.1 (Win) / 7+ (Linux/macOS) | Script host                       |
-| yt-dlp      | 2026.08.19+ | Latest stable release baseline for the downloader  |
+| yt-dlp      | Latest stable | Checked before media processing on every invocation |
 | ffmpeg      | any recent  | Container muxing / remuxing                        |
 | ffprobe     | any recent  | Media inspection (shipped with ffmpeg)             |
-| Python      | 3.10+       | Only if yt-dlp must be installed via the `pip` fallback |
+| Python      | 3.10+       | Needed by the installer's `pip` fallback; the downloader does not update Python |
 | winget / Chocolatey | n/a | Windows package manager (one is required; installer bootstraps Chocolatey if neither is present) |
 
 ## Versioning

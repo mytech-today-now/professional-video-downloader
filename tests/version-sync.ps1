@@ -240,6 +240,93 @@ function Assert-VersionFileTrimming {
     }
 }
 
+function New-TestYtDlpExecutable {
+    param([Parameter(Mandatory)][string]$RootPath)
+
+    $binPath = Join-Path $RootPath 'fake-yt-dlp-bin'
+    New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        $executablePath = Join-Path $binPath 'yt-dlp.cmd'
+        $scriptText = @'
+@echo off
+if "%~1"=="--version" (
+  >>"%PVD_FAKE_YTDLP_LOG%" echo %*
+  goto version
+)
+>>"%PVD_FAKE_YTDLP_LOG%" echo %*
+if "%PVD_FAKE_YTDLP_FAIL%"=="1" (
+  echo ERROR: unable to download video data: HTTP Error 403: Forbidden 1>&2
+  exit /b 1
+)
+echo [download] Destination: %PVD_FAKE_DOWNLOAD%\fake.mp4
+exit /b 0
+:version
+echo %PVD_FAKE_YTDLP_VERSION%
+exit /b 0
+'@
+    }
+    else {
+        $executablePath = Join-Path $binPath 'yt-dlp'
+        $scriptText = @'
+#!/usr/bin/env pwsh
+if ($args -contains '--version') {
+    Add-Content -LiteralPath $env:PVD_FAKE_YTDLP_LOG -Value ($args -join ' ') -Encoding Ascii
+    [Console]::WriteLine($env:PVD_FAKE_YTDLP_VERSION)
+    exit 0
+}
+Add-Content -LiteralPath $env:PVD_FAKE_YTDLP_LOG -Value ($args -join ' ') -Encoding Ascii
+if ($env:PVD_FAKE_YTDLP_FAIL -eq '1') {
+    [Console]::Error.WriteLine('ERROR: unable to download video data: HTTP Error 403: Forbidden')
+    exit 1
+}
+[Console]::WriteLine('[download] Destination: {0}/fake.mp4' -f $env:PVD_FAKE_DOWNLOAD)
+exit 0
+'@
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($executablePath, ($scriptText -replace "`r`n", "`n"), $utf8NoBom)
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        & chmod +x $executablePath
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Could not mark the fake yt-dlp executable as executable.'
+        }
+    }
+
+    return [pscustomobject]@{
+        BinPath = $binPath
+        Path    = $executablePath
+    }
+}
+
+function Add-TestYtDlpEnvironment {
+    param(
+        [Parameter(Mandatory)][string]$WrapperText,
+        [Parameter(Mandatory)][string]$FakeBinPath,
+        [Parameter(Mandatory)][string]$Version,
+        [Parameter(Mandatory)][string]$CallLogPath,
+        [Parameter(Mandatory)][string]$DownloadPath,
+        [string]$Fail = '0'
+    )
+
+    $prefix = @"
+`$env:PATH = '$($FakeBinPath.Replace("'", "''"))' + [System.IO.Path]::PathSeparator + `$env:PATH
+`$env:PVD_FAKE_YTDLP_VERSION = '$($Version.Replace("'", "''"))'
+`$env:PVD_FAKE_YTDLP_LOG = '$($CallLogPath.Replace("'", "''"))'
+`$env:PVD_FAKE_DOWNLOAD = '$($DownloadPath.Replace("'", "''"))'
+`$env:PVD_FAKE_YTDLP_FAIL = '$Fail'
+function global:Invoke-WebRequest {
+    [CmdletBinding()]
+    param([string]`$Uri, [hashtable]`$Headers, [int]`$TimeoutSec, [int]`$MaximumRedirection, [switch]`$UseBasicParsing)
+    if (`$Uri -eq 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest') {
+        return [pscustomobject]@{ StatusCode = 200; Content = '{"tag_name":"2026.08.19","draft":false,"prerelease":false}' }
+    }
+    throw ("Unexpected network request: {0}" -f `$Uri)
+}
+"@
+    return ($prefix + $WrapperText)
+}
+
 function Invoke-MainScriptSmoke {
     param(
         [Parameter(Mandatory)][string]$SourceRoot,
@@ -252,6 +339,8 @@ function Invoke-MainScriptSmoke {
     $stateRoot = Join-Path $fixtureRoot 'state'
     New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+    $fakeYtDlp = New-TestYtDlpExecutable -RootPath $fixtureRoot
+    $callLogPath = Join-Path $fixtureRoot 'smoke.yt-dlp-calls.log'
     $logPath = Join-Path (Get-AppStateRoot -BasePath $stateRoot) 'logs'
     try {
         if ($ForceLogPathFailure) {
@@ -277,15 +366,6 @@ function Invoke-MainScriptSmoke {
         $wrapper = @'
 $env:LOCALAPPDATA = '__STATE__'
 Start-Transcript -LiteralPath '__TRANSCRIPT__' -Force | Out-Null
-function global:yt-dlp {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    $global:LASTEXITCODE = 0
-    if ($Args -contains '--version') {
-        Write-Output 'yt-dlp 2026.08.19'
-        return
-    }
-Write-Output '[download] Destination: __DOWNLOAD__/fake.mp4'
-}
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 & '__SCRIPT__' -Url @('https://example.com/video') -DownloadPath '__DOWNLOAD__'
 $stopwatch.Stop()
@@ -301,6 +381,7 @@ exit ([int](-not $?))
         $wrapper = $wrapper.Replace('__STATE__', $stateRootArg)
         $wrapper = $wrapper.Replace('__SCRIPT__', $scriptPath)
         $wrapper = $wrapper.Replace('__ELAPSED__', $elapsedPath.Replace("'", "''"))
+        $wrapper = Add-TestYtDlpEnvironment -WrapperText $wrapper -FakeBinPath $fakeYtDlp.BinPath -Version 'yt-dlp 2026.08.19' -CallLogPath $callLogPath -DownloadPath $downloadRoot
         Set-Content -LiteralPath $wrapperPath -Value $wrapper -Encoding Ascii
         $result = Invoke-MainScriptProcess -WrapperPath $wrapperPath -TranscriptPath $transcriptPath -ElapsedPath $elapsedPath
 
@@ -312,6 +393,11 @@ exit ([int](-not $?))
         Assert-True $bannerMatch.Success "Smoke run did not print the runtime banner.`n$outputText"
         Assert-True ($bannerMatch.Groups['version'].Value.Trim() -eq $ExpectedVersion) "Banner version '$($bannerMatch.Groups['version'].Value.Trim())' does not match '$ExpectedVersion'."
         Assert-True ($outputText -notmatch "property 'Count' cannot be found on this object") 'Smoke run hit the single-item Count regression in the summary path.'
+
+        $ytDlpCalls = if (Test-Path -LiteralPath $callLogPath) { @(Get-Content -LiteralPath $callLogPath) } else { @() }
+        Assert-True ($ytDlpCalls.Count -ge 2) 'The resolved yt-dlp executable should receive both the version check and download call.'
+        Assert-True ($ytDlpCalls[0].Trim() -eq '--version') 'The effective yt-dlp executable should be version-checked before download.'
+        Assert-True ($ytDlpCalls[1] -match '--format') 'The executable used for the version check should receive download arguments after preflight.'
 
         if ($ForceLogPathFailure) {
             $warningText = 'Warning: Unable to write log entry. Diagnostics will no longer be recorded for this run.'
@@ -366,7 +452,11 @@ function Invoke-MainScriptFailureSmoke {
 
     $fixtureRoot = Copy-SourceFixture -SourceRoot $SourceRoot -FileNames @('professional-video-downloader.ps1', 'VERSION')
     $downloadRoot = Join-Path $fixtureRoot 'downloads'
+    $stateRoot = Join-Path $fixtureRoot 'state'
     New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+    $fakeYtDlp = New-TestYtDlpExecutable -RootPath $fixtureRoot
+    $callLogPath = Join-Path $fixtureRoot 'failure.yt-dlp-calls.log'
 
     try {
         $scriptPath = (Join-Path $fixtureRoot 'professional-video-downloader.ps1').Replace("'", "''")
@@ -377,18 +467,8 @@ function Invoke-MainScriptFailureSmoke {
         $elapsedPath = Join-Path $fixtureRoot 'failure.elapsed.txt'
         $wrapperPath = Join-Path $fixtureRoot 'failure-wrapper.ps1'
         $wrapper = @'
+$env:LOCALAPPDATA = '__STATE__'
 Start-Transcript -LiteralPath '__TRANSCRIPT__' -Force | Out-Null
-function global:yt-dlp {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    if ($Args -contains '--version') {
-        $global:LASTEXITCODE = 0
-        Write-Output 'yt-dlp 2026.08.19'
-        return
-    }
-
-    $global:LASTEXITCODE = 1
-    Write-Output 'ERROR: unable to download video data: HTTP Error 403: Forbidden'
-}
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 & '__SCRIPT__' -Url @('https://example.com/video') -DownloadPath '__DOWNLOAD__'
 $stopwatch.Stop()
@@ -400,9 +480,11 @@ if ($childExitCodeVar -and $null -ne $childExitCodeVar.Value) {
 exit ([int](-not $?))
 '@
         $wrapper = $wrapper.Replace('__TRANSCRIPT__', $transcriptPath)
+        $wrapper = $wrapper.Replace('__STATE__', $stateRoot.Replace("'", "''"))
         $wrapper = $wrapper.Replace('__DOWNLOAD__', $downloadDirArg)
         $wrapper = $wrapper.Replace('__SCRIPT__', $scriptPath)
         $wrapper = $wrapper.Replace('__ELAPSED__', $elapsedPath.Replace("'", "''"))
+        $wrapper = Add-TestYtDlpEnvironment -WrapperText $wrapper -FakeBinPath $fakeYtDlp.BinPath -Version 'yt-dlp 2026.08.19' -CallLogPath $callLogPath -DownloadPath $downloadRoot -Fail '1'
         Set-Content -LiteralPath $wrapperPath -Value $wrapper -Encoding Ascii
         $result = Invoke-MainScriptProcess -WrapperPath $wrapperPath -TranscriptPath $transcriptPath -ElapsedPath $elapsedPath
 
@@ -425,6 +507,8 @@ function Invoke-MainScriptNoInputScenario {
     $fixtureRoot = Copy-SourceFixture -SourceRoot $SourceRoot -FileNames @('professional-video-downloader.ps1', 'VERSION')
     $downloadRoot = Join-Path $fixtureRoot 'downloads'
     New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
+    $fakeYtDlp = New-TestYtDlpExecutable -RootPath $fixtureRoot
+    $callLogPath = Join-Path $fixtureRoot 'noinput.yt-dlp-calls.log'
     try {
         $scriptPath = (Join-Path $fixtureRoot 'professional-video-downloader.ps1').Replace("'", "''")
         $downloadDirArg = $downloadRoot.Replace("'", "''")
@@ -457,6 +541,7 @@ exit ([int](-not $?))
         $wrapper = $wrapper.Replace('__SCRIPT__', $scriptPath)
         $wrapper = $wrapper.Replace('__ELAPSED__', $elapsedPath.Replace("'", "''"))
         $wrapper = $wrapper.Replace('__PROMPTS__', $promptLogPath.Replace("'", "''"))
+        $wrapper = Add-TestYtDlpEnvironment -WrapperText $wrapper -FakeBinPath $fakeYtDlp.BinPath -Version 'yt-dlp 2026.08.19' -CallLogPath $callLogPath -DownloadPath $downloadRoot
         Set-Content -LiteralPath $wrapperPath -Value $wrapper -Encoding Ascii
 
         $result = Invoke-MainScriptProcess -WrapperPath $wrapperPath -TranscriptPath $transcriptPath -ElapsedPath $elapsedPath
@@ -477,8 +562,11 @@ function Invoke-MainScriptVersionGateScenario {
 
     $fixtureRoot = Copy-SourceFixture -SourceRoot $SourceRoot -FileNames @('professional-video-downloader.ps1', 'VERSION')
     $downloadRoot = Join-Path $fixtureRoot 'downloads'
+    $stateRoot = Join-Path $fixtureRoot 'state'
     New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
     $callLogPath = Join-Path $fixtureRoot 'yt-dlp-calls.log'
+    $fakeYtDlp = New-TestYtDlpExecutable -RootPath $fixtureRoot
     try {
         $hostExe = Get-PowerShellHost
         $scriptPath = (Join-Path $fixtureRoot 'professional-video-downloader.ps1').Replace("'", "''")
@@ -489,19 +577,9 @@ function Invoke-MainScriptVersionGateScenario {
         $stderrPath = Join-Path $fixtureRoot 'gate.stderr.log'
         $wrapperPath = Join-Path $fixtureRoot 'gate-wrapper.ps1'
         $wrapper = @'
+$env:LOCALAPPDATA = '__STATE__'
 Start-Transcript -LiteralPath '__TRANSCRIPT__' -Force | Out-Null
 $callLogPath = '__CALLLOG__'
-function global:yt-dlp {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    $line = ($Args -join ' ')
-    Add-Content -LiteralPath $callLogPath -Value $line -Encoding Ascii
-    $global:LASTEXITCODE = 0
-    if ($Args -contains '--version') {
-        Write-Output 'yt-dlp 2026.08.18'
-        return
-    }
-    throw 'yt-dlp should not receive download flags when the version gate fails.'
-}
 & '__SCRIPT__' -Url @('https://example.com/video') -DownloadPath '__DOWNLOAD__' -CookiesFromBrowser firefox -Impersonate
 $childExitCodeVar = Get-Variable -Name LASTEXITCODE -Scope 0 -ErrorAction SilentlyContinue
 if ($childExitCodeVar -and $null -ne $childExitCodeVar.Value) {
@@ -510,9 +588,11 @@ if ($childExitCodeVar -and $null -ne $childExitCodeVar.Value) {
 exit ([int](-not $?))
 '@
         $wrapper = $wrapper.Replace('__TRANSCRIPT__', $transcriptPath)
+        $wrapper = $wrapper.Replace('__STATE__', $stateRoot.Replace("'", "''"))
         $wrapper = $wrapper.Replace('__CALLLOG__', $callLogArg)
         $wrapper = $wrapper.Replace('__SCRIPT__', $scriptPath)
         $wrapper = $wrapper.Replace('__DOWNLOAD__', $downloadDirArg)
+        $wrapper = Add-TestYtDlpEnvironment -WrapperText $wrapper -FakeBinPath $fakeYtDlp.BinPath -Version 'yt-dlp 2026.08.18' -CallLogPath $callLogPath -DownloadPath $downloadRoot
         Set-Content -LiteralPath $wrapperPath -Value $wrapper -Encoding Ascii
         $startArgs = @{
             FilePath = $hostExe
@@ -554,12 +634,55 @@ exit ([int](-not $?))
             ''
         }
 
-        Assert-True ($outputText -match 'yt-dlp 2026\.08\.18 is too old') "Version-gate failure did not surface the upgrade message.`n$outputText"
-        Assert-True ($outputText -match [regex]::Escape("run 'yt-dlp -U' for standalone release binaries")) "Version-gate failure did not include the upgrade path.`n$outputText"
+        Assert-True ($outputText -match 'yt-dlp 2026\.08\.18 at .* is behind latest stable 2026\.08\.19') "Version-gate failure did not surface the stable-release update message.`n$outputText"
+        Assert-True ($outputText -match 'same package manager or Python interpreter') "Version-gate failure did not include owner-specific update guidance.`n$outputText"
         Assert-True ($callLog.Trim() -eq '--version') "Version gate should only query yt-dlp --version before exiting.`n$callLog"
         Assert-True ($outputText -notmatch 'Using cookies from browser: firefox') 'Version gate failure should happen before browser-cookie features are announced.'
         Assert-True ($outputText -notmatch 'Using browser impersonation: chrome') 'Version gate failure should happen before impersonation is announced.'
         Assert-True ($outputText -notmatch 'Starting high-quality download with yt-dlp') 'Version gate failure should happen before the download path starts.'
+    }
+    finally {
+        Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-MainScriptMissingYtDlpScenario {
+    param([Parameter(Mandatory)][string]$SourceRoot)
+
+    $fixtureRoot = Copy-SourceFixture -SourceRoot $SourceRoot -FileNames @('professional-video-downloader.ps1', 'VERSION')
+    try {
+        $scriptPath = (Join-Path $fixtureRoot 'professional-video-downloader.ps1').Replace("'", "''")
+        $downloadRoot = Join-Path $fixtureRoot 'downloads'
+        $stateRoot = Join-Path $fixtureRoot 'state'
+        $transcriptPath = Join-Path $fixtureRoot 'missing-ytdlp.transcript.log'
+        $elapsedPath = Join-Path $fixtureRoot 'missing-ytdlp.elapsed.txt'
+        $wrapperPath = Join-Path $fixtureRoot 'missing-ytdlp-wrapper.ps1'
+        $wrapper = @'
+$env:LOCALAPPDATA = '__STATE__'
+Remove-Item Env:PATH -ErrorAction SilentlyContinue
+Start-Transcript -LiteralPath '__TRANSCRIPT__' -Force | Out-Null
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+& '__SCRIPT__' -Url @('https://example.com/video') -DownloadPath '__DOWNLOAD__'
+$stopwatch.Stop()
+Set-Content -LiteralPath '__ELAPSED__' -Value $stopwatch.ElapsedMilliseconds -Encoding Ascii
+$childExitCodeVar = Get-Variable -Name LASTEXITCODE -Scope 0 -ErrorAction SilentlyContinue
+if ($childExitCodeVar -and $null -ne $childExitCodeVar.Value) {
+    exit $childExitCodeVar.Value
+}
+exit ([int](-not $?))
+'@
+        $wrapper = $wrapper.Replace('__STATE__', $stateRoot.Replace("'", "''"))
+        $wrapper = $wrapper.Replace('__TRANSCRIPT__', $transcriptPath.Replace("'", "''"))
+        $wrapper = $wrapper.Replace('__SCRIPT__', $scriptPath)
+        $wrapper = $wrapper.Replace('__DOWNLOAD__', $downloadRoot.Replace("'", "''"))
+        $wrapper = $wrapper.Replace('__ELAPSED__', $elapsedPath.Replace("'", "''"))
+        Set-Content -LiteralPath $wrapperPath -Value $wrapper -Encoding Ascii
+
+        $result = Invoke-MainScriptProcess -WrapperPath $wrapperPath -TranscriptPath $transcriptPath -ElapsedPath $elapsedPath
+        Assert-True ($result.ExitCode -eq 1) "Missing yt-dlp should stop the downloader with exit code 1.`n$($result.OutputText)"
+        Assert-True ($result.OutputText -match 'yt-dlp was not found in PATH') 'Missing yt-dlp error should identify the missing command.'
+        Assert-True ($result.OutputText -notmatch 'Download folder:|Starting high-quality download with yt-dlp') 'Downloader proceeded beyond preflight after yt-dlp was missing.'
+        Assert-True (-not (Test-Path -LiteralPath $downloadRoot)) 'Missing yt-dlp preflight created the download directory before failing.'
     }
     finally {
         Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -605,6 +728,12 @@ $version = Assert-StaticVersionSurface -SourceRoot $RootPath
 Write-Step "Positive: runtime banner and log line expose the same version"
 Invoke-MainScriptSmoke -SourceRoot $RootPath -ExpectedVersion $version
 $script:SmokeBaselineElapsedMs = $script:LastSmokeResult.ElapsedMilliseconds
+
+Write-Step "Negative: missing yt-dlp stops before media processing"
+Invoke-MainScriptMissingYtDlpScenario -SourceRoot $RootPath
+
+Write-Step "Negative: outdated unsupported owner stops before media processing"
+Invoke-MainScriptVersionGateScenario -SourceRoot $RootPath
 
 Write-Step "Negative: failed downloads still reach the summary without Count errors"
 Invoke-MainScriptFailureSmoke -SourceRoot $RootPath -ExpectedVersion $version

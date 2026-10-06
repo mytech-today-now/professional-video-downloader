@@ -14,12 +14,12 @@ if (-not $RootPath) {
     $RootPath = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 }
 
-$script:HostMessages = [System.Collections.Generic.List[string]]::new()
-$script:LogEntries   = [System.Collections.Generic.List[object]]::new()
 $script:TestIsWindowsPlatformOverride = $null
 $script:BlockComLookup = $false
-$script:DownloadPathFallbackLogged = $false
-$script:ColorWarning = 'Yellow'
+$script:MockDownloadFolderPlatform = $null
+$script:MockXdgDownloads = $null
+$script:MockMacDownloads = $null
+$script:FakeShellDownloadsPath = $null
 
 function Write-Step {
     param([string]$Message)
@@ -59,27 +59,22 @@ function Test-IsWindowsPlatform {
     return (Test-CurrentHostIsWindows)
 }
 
-function Write-Colored {
-    param(
-        [string]$Message,
-        [string]$Color
-    )
-
-    [void]$script:HostMessages.Add($Message)
+function uname {
+    if ($script:MockDownloadFolderPlatform) {
+        return $script:MockDownloadFolderPlatform
+    }
 }
 
-function Write-Log {
-    param(
-        [Parameter(Mandatory)][string]$Message,
-        [string]$Level = 'INFO',
-        [hashtable]$Context
-    )
+function xdg-user-dir {
+    if ($script:MockXdgDownloads) {
+        return $script:MockXdgDownloads
+    }
+}
 
-    [void]$script:LogEntries.Add([pscustomobject]@{
-        Message = $Message
-        Level   = $Level
-        Context = $Context
-    })
+function osascript {
+    if ($script:MockMacDownloads) {
+        return $script:MockMacDownloads
+    }
 }
 
 function New-Object {
@@ -90,6 +85,20 @@ function New-Object {
 
     if ($script:BlockComLookup -and ($RemainingArgs -contains '-ComObject')) {
         throw 'COM lookup should not run in this scenario.'
+    }
+
+    if (($RemainingArgs -contains '-ComObject') -and $script:FakeShellDownloadsPath) {
+        $downloadsPath = $script:FakeShellDownloadsPath
+        $namespaceMethod = {
+            param($Name)
+            if ($Name -eq 'shell:Downloads') {
+                return [pscustomobject]@{ Self = [pscustomobject]@{ Path = $downloadsPath } }
+            }
+            return $null
+        }.GetNewClosure()
+        $fakeShell = [pscustomobject]@{}
+        $fakeShell | Add-Member -MemberType ScriptMethod -Name Namespace -Value $namespaceMethod
+        return $fakeShell
     }
 
     & (Get-Command Microsoft.PowerShell.Utility\New-Object) @RemainingArgs
@@ -152,8 +161,7 @@ function Import-DownloaderHelpers {
     }
 
     $functionNames = @(
-        'Get-PredictableDownloadPath',
-        'Write-DownloadFallbackNotice',
+        'Get-UserHomeDirectory',
         'Get-DownloadsFolder'
     )
     $definitions = [System.Collections.Generic.List[string]]::new()
@@ -174,6 +182,52 @@ function Import-DownloaderHelpers {
     return $helperPath
 }
 
+function New-TestYtDlpExecutable {
+    param([Parameter(Mandatory)][string]$RootPath)
+
+    $binPath = Join-Path $RootPath 'fake-yt-dlp-bin'
+    New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        $executablePath = Join-Path $binPath 'yt-dlp.cmd'
+        $scriptText = @'
+@echo off
+if "%~1"=="--version" (
+  >>"%PVD_FAKE_YTDLP_LOG%" echo %*
+  echo %PVD_FAKE_YTDLP_VERSION%
+  exit /b 0
+)
+>>"%PVD_FAKE_YTDLP_LOG%" echo %*
+echo [download] Destination: %PVD_FAKE_DOWNLOAD%\fake.mp4
+exit /b 0
+'@
+    }
+    else {
+        $executablePath = Join-Path $binPath 'yt-dlp'
+        $scriptText = @'
+#!/usr/bin/env pwsh
+if ($args -contains '--version') {
+    Add-Content -LiteralPath $env:PVD_FAKE_YTDLP_LOG -Value ($args -join ' ') -Encoding Ascii
+    [Console]::WriteLine($env:PVD_FAKE_YTDLP_VERSION)
+    exit 0
+}
+Add-Content -LiteralPath $env:PVD_FAKE_YTDLP_LOG -Value ($args -join ' ') -Encoding Ascii
+[Console]::WriteLine('[download] Destination: {0}/fake.mp4' -f $env:PVD_FAKE_DOWNLOAD)
+exit 0
+'@
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($executablePath, ($scriptText -replace "`r`n", "`n"), $utf8NoBom)
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        & chmod +x $executablePath
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Could not mark the fake yt-dlp executable as executable.'
+        }
+    }
+
+    return [pscustomobject]@{ BinPath = $binPath; Path = $executablePath }
+}
+
 function Invoke-MainScriptRun {
     param(
         [Parameter(Mandatory)][string]$FixtureRoot,
@@ -190,15 +244,24 @@ function Invoke-MainScriptRun {
     $stdoutPath = Join-Path $FixtureRoot 'run.stdout.log'
     $stderrPath = Join-Path $FixtureRoot 'run.stderr.log'
     $wrapperPath = Join-Path $FixtureRoot 'run-wrapper.ps1'
+    $fakeYtDlp = New-TestYtDlpExecutable -RootPath $FixtureRoot
+    $callLogPath = Join-Path $FixtureRoot 'yt-dlp-calls.log'
 
     $environmentLines = New-Object System.Collections.Generic.List[string]
+    [void]$environmentLines.Add("`$env:PATH = '$($fakeYtDlp.BinPath.Replace("'", "''"))' + [System.IO.Path]::PathSeparator + `$env:PATH")
+    [void]$environmentLines.Add("`$env:PVD_FAKE_YTDLP_VERSION = 'yt-dlp 2026.08.19'")
+    [void]$environmentLines.Add("`$env:PVD_FAKE_YTDLP_LOG = '$($callLogPath.Replace("'", "''"))'")
+    [void]$environmentLines.Add("`$env:PVD_FAKE_DOWNLOAD = '$($ExpectedDownloadPath.Replace("'", "''"))'")
     [void]$environmentLines.Add('Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue')
     [void]$environmentLines.Add("`$env:LOCALAPPDATA = '$($StateRoot.Replace("'", "''"))'")
     if ($HomePath) {
         [void]$environmentLines.Add("`$env:HOME = '$($HomePath.Replace("'", "''"))'")
+        $xdgConfigPath = Join-Path $HomePath '.config'
+        [void]$environmentLines.Add("`$env:XDG_CONFIG_HOME = '$($xdgConfigPath.Replace("'", "''"))'")
     }
     else {
         [void]$environmentLines.Add('Remove-Item Env:HOME -ErrorAction SilentlyContinue')
+        [void]$environmentLines.Add('Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue')
     }
 
     $downloadArgText = ''
@@ -216,14 +279,13 @@ function global:New-Object {
     }
     & (Get-Command Microsoft.PowerShell.Utility\New-Object) @RemainingArgs
 }
-function global:yt-dlp {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    $global:LASTEXITCODE = 0
-    if ($Args -contains '--version') {
-        Write-Output 'yt-dlp 2026.08.19'
-        return
+function global:Invoke-WebRequest {
+    [CmdletBinding()]
+    param([string]$Uri, [hashtable]$Headers, [int]$TimeoutSec, [int]$MaximumRedirection, [switch]$UseBasicParsing)
+    if ($Uri -eq 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest') {
+        return [pscustomobject]@{ StatusCode = 200; Content = '{"tag_name":"2026.08.19","draft":false,"prerelease":false}' }
     }
-    Write-Output '[download] Destination: __EXPECTED__/fake.mp4'
+    throw ("Unexpected network request: {0}" -f $Uri)
 }
 & '__SCRIPT__' -Url @('__URL__') __DOWNLOADARG__
 $childExitCodeVar = Get-Variable -Name LASTEXITCODE -Scope 0 -ErrorAction SilentlyContinue
@@ -235,7 +297,6 @@ exit ([int](-not $?))
     $wrapper = $wrapper.Replace('__ENV__', ($environmentLines -join "`r`n"))
     $wrapper = $wrapper.Replace('__TRANSCRIPT__', $transcriptPath.Replace("'", "''"))
     $wrapper = $wrapper.Replace('__SCRIPT__', $scriptPath)
-    $wrapper = $wrapper.Replace('__EXPECTED__', $ExpectedDownloadPath.Replace("'", "''"))
     $wrapper = $wrapper.Replace('__URL__', $Url.Replace("'", "''"))
     $wrapper = $wrapper.Replace('__DOWNLOADARG__', $downloadArgText)
 
@@ -287,92 +348,64 @@ exit ([int](-not $?))
     }
 }
 
-function Invoke-HelperPositiveScenario {
+function Invoke-PlatformResolverScenarios {
     $workspace = New-TestWorkspace
     $homeRoot = Join-Path $workspace 'home'
-    New-Item -ItemType Directory -Path (Join-Path $homeRoot 'Downloads') -Force | Out-Null
+    $configRoot = Join-Path $workspace 'config'
+    New-Item -ItemType Directory -Path $homeRoot, $configRoot -Force | Out-Null
 
     $originalHome = [Environment]::GetEnvironmentVariable('HOME', 'Process')
     $originalUserProfile = [Environment]::GetEnvironmentVariable('USERPROFILE', 'Process')
-    $script:HostMessages = [System.Collections.Generic.List[string]]::new()
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
-    $script:TestIsWindowsPlatformOverride = $false
-    $script:BlockComLookup = $true
-    $env:HOME = $homeRoot
-    Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue
+    $originalXdgConfigHome = [Environment]::GetEnvironmentVariable('XDG_CONFIG_HOME', 'Process')
 
     try {
+        $env:HOME = $homeRoot
+        $env:XDG_CONFIG_HOME = $configRoot
+        Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue
+        $script:TestIsWindowsPlatformOverride = $false
+        $script:BlockComLookup = $true
+        $script:FakeShellDownloadsPath = $null
+        $script:MockXdgDownloads = $null
+        $script:MockMacDownloads = $null
+
+        $script:MockDownloadFolderPlatform = 'Linux'
         $result = Get-DownloadsFolder
-        Assert-True ($result -eq (Join-Path $homeRoot 'Downloads')) "Helper did not return the HOME downloads path. Got '$result'."
-        Assert-True ($script:HostMessages.Count -eq 0) 'Helper logged a fallback even though the HOME downloads folder already existed.'
-        Assert-True ($script:LogEntries.Count -eq 0) 'Helper wrote a fallback log even though the HOME downloads folder already existed.'
+        $expected = Join-Path $homeRoot 'Downloads'
+        Assert-True ($result -eq $expected) "Linux resolver did not use the default HOME Downloads folder. Got '$result'."
+        Assert-True (-not (Test-Path -LiteralPath $result)) 'Resolver should not create the Downloads folder before the main script ensures it exists.'
+
+        $script:MockXdgDownloads = Join-Path $workspace 'localized downloads'
+        $result = Get-DownloadsFolder
+        Assert-True ($result -eq $script:MockXdgDownloads) "Linux resolver did not honor xdg-user-dir DOWNLOAD. Got '$result'."
+
+        $script:MockXdgDownloads = $null
+        New-Item -ItemType Directory -Path $configRoot -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $configRoot 'user-dirs.dirs') -Value 'XDG_DOWNLOAD_DIR="$HOME/Localized Downloads"' -Encoding Ascii
+        $expected = "$homeRoot/Localized Downloads"
+        $result = Get-DownloadsFolder
+        Assert-True ($result -eq $expected) "Linux resolver did not honor XDG_DOWNLOAD_DIR in user-dirs.dirs. Got '$result'."
+
+        $script:MockDownloadFolderPlatform = 'Darwin'
+        $script:MockMacDownloads = Join-Path $workspace 'macOS default downloads'
+        $result = Get-DownloadsFolder
+        Assert-True ($result -eq $script:MockMacDownloads) "macOS resolver did not use the system Downloads folder. Got '$result'."
+
+        $script:TestIsWindowsPlatformOverride = $true
+        $script:BlockComLookup = $false
+        $script:FakeShellDownloadsPath = Join-Path $workspace 'Windows known Downloads'
+        $result = Get-DownloadsFolder
+        Assert-True ($result -eq $script:FakeShellDownloadsPath) "Windows resolver did not use shell:Downloads. Got '$result'."
     }
     finally {
-        if ($null -eq $originalHome) {
-            Remove-Item Env:HOME -ErrorAction SilentlyContinue
-        }
-        else {
-            $env:HOME = $originalHome
-        }
-
-        if ($null -eq $originalUserProfile) {
-            Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue
-        }
-        else {
-            $env:USERPROFILE = $originalUserProfile
-        }
-
+        [Environment]::SetEnvironmentVariable('HOME', $originalHome, 'Process')
+        [Environment]::SetEnvironmentVariable('USERPROFILE', $originalUserProfile, 'Process')
+        [Environment]::SetEnvironmentVariable('XDG_CONFIG_HOME', $originalXdgConfigHome, 'Process')
         $script:TestIsWindowsPlatformOverride = $null
         $script:BlockComLookup = $false
-        Remove-TestWorkspace -Path $workspace
-    }
-}
-
-function Invoke-HelperFallbackScenario {
-    $workspace = New-TestWorkspace
-    $homeRoot = Join-Path $workspace 'home'
-    New-Item -ItemType Directory -Path $homeRoot -Force | Out-Null
-
-    $originalHome = [Environment]::GetEnvironmentVariable('HOME', 'Process')
-    $originalUserProfile = [Environment]::GetEnvironmentVariable('USERPROFILE', 'Process')
-    $script:HostMessages = [System.Collections.Generic.List[string]]::new()
-    $script:LogEntries = [System.Collections.Generic.List[object]]::new()
-    $script:TestIsWindowsPlatformOverride = $false
-    $script:BlockComLookup = $true
-    $script:DownloadPathFallbackLogged = $false
-    $env:HOME = $homeRoot
-    Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue
-
-    $expectedPath = Join-Path (Join-Path $homeRoot 'Professional Video Downloader') 'Downloads'
-
-    try {
-        $result = Get-DownloadsFolder
-        Assert-True ($result -eq $expectedPath) "Helper did not return the predictable profile fallback path. Got '$result'."
-        Assert-True (Test-Path -LiteralPath $result) 'Helper did not create the fallback download directory.'
-
-        $fallbackMessage = $script:HostMessages | Where-Object { $_ -match [regex]::Escape($expectedPath) } | Select-Object -First 1
-        Assert-True ($null -ne $fallbackMessage) 'Helper did not log the fallback download path.'
-        Assert-True ($script:LogEntries.Count -eq 1) 'Helper should log the fallback path once.'
-        Assert-True ($script:LogEntries[0].Level -eq 'WARN') 'Fallback log should be a warning.'
-        Assert-True ($script:LogEntries[0].Context.path -eq $expectedPath) 'Fallback log context did not include the selected path.'
-    }
-    finally {
-        if ($null -eq $originalHome) {
-            Remove-Item Env:HOME -ErrorAction SilentlyContinue
-        }
-        else {
-            $env:HOME = $originalHome
-        }
-
-        if ($null -eq $originalUserProfile) {
-            Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue
-        }
-        else {
-            $env:USERPROFILE = $originalUserProfile
-        }
-
-        $script:TestIsWindowsPlatformOverride = $null
-        $script:BlockComLookup = $false
+        $script:MockDownloadFolderPlatform = $null
+        $script:MockXdgDownloads = $null
+        $script:MockMacDownloads = $null
+        $script:FakeShellDownloadsPath = $null
         Remove-TestWorkspace -Path $workspace
     }
 }
@@ -382,115 +415,71 @@ function Invoke-MainScriptSmokeScenario {
     $homeRoot = Join-Path $fixtureRoot 'home'
     $stateRoot = Join-Path $fixtureRoot 'state'
     New-Item -ItemType Directory -Path $homeRoot -Force | Out-Null
-    $expectedDownloadPath = Join-Path (Join-Path $homeRoot 'Professional Video Downloader') 'Downloads'
+    $expectedDownloadPath = Join-Path $homeRoot 'Downloads'
 
     try {
         $result = Invoke-MainScriptRun -FixtureRoot $fixtureRoot -StateRoot $stateRoot -ExpectedDownloadPath $expectedDownloadPath -Url 'https://example.com/video' -HomePath $homeRoot
 
         Assert-True ($result.ExitCode -eq 0) "Main script smoke run failed with exit code $($result.ExitCode).`n$($result.Output)"
-        Assert-True (Test-Path -LiteralPath $expectedDownloadPath) 'Main script did not create the fallback downloads path.'
-        Assert-True ($result.Output -match [regex]::Escape("Downloads folder unavailable. Using app folder under your profile: $expectedDownloadPath")) 'Main script did not announce the fallback download path.'
-        Assert-True ($result.Output -match [regex]::Escape("Download folder: $expectedDownloadPath")) 'Main script did not use the fallback download path on a run without -DownloadPath.'
+        Assert-True (Test-Path -LiteralPath $expectedDownloadPath -PathType Container) 'Main script did not create the user Downloads folder.'
+        Assert-True ($result.Output -match [regex]::Escape("Download folder: $expectedDownloadPath")) 'Main script did not use the user Downloads folder on a run without -DownloadPath.'
 
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixtureRoot 'VideoDownloaderConfig.json'))) 'Main script still wrote config into the install tree.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixtureRoot 'logs'))) 'Main script still wrote logs into the install tree.'
-        Assert-True (Test-Path -LiteralPath $result.ConfigPath) 'Main script did not persist the fallback path to the user state directory.'
+        Assert-True (-not (Test-Path -LiteralPath $result.ConfigPath)) 'Main script still persisted a download path preference.'
         Assert-True (Test-Path -LiteralPath $result.LogDir) 'Main script did not create the user state log directory.'
         Assert-True (Test-Path -LiteralPath (Join-Path $result.LogDir ("{0}.log" -f (Get-Date -Format 'yyyy-MM-dd')))) 'Main script did not write a dated log file into the user state directory.'
-
-        $config = Get-Content -LiteralPath $result.ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
-        Assert-True ($config.DownloadPath -eq $expectedDownloadPath) 'Default fallback run did not store the effective download path.'
     }
     finally {
         Remove-TestWorkspace -Path $fixtureRoot
     }
 }
 
-function Invoke-SavedConfigScenario {
+function Invoke-PathOverrideScenario {
     $fixtureRoot = Copy-SourceFixture -SourceRoot $RootPath -FileNames @('professional-video-downloader.ps1', 'VERSION')
     $stateRoot = Join-Path $fixtureRoot 'state'
     $firstDownloadRoot = Join-Path $fixtureRoot 'first-downloads'
-    $secondHomeRoot = Join-Path $fixtureRoot 'second-home'
-    New-Item -ItemType Directory -Path $firstDownloadRoot -Force | Out-Null
-    New-Item -ItemType Directory -Path $secondHomeRoot -Force | Out-Null
-
-    try {
-        $firstRun = Invoke-MainScriptRun -FixtureRoot $fixtureRoot -StateRoot $stateRoot -ExpectedDownloadPath $firstDownloadRoot -Url 'https://example.com/video' -DownloadPathArg $firstDownloadRoot -HomePath $secondHomeRoot
-        Assert-True ($firstRun.ExitCode -eq 0) "Main script did not complete the initial config-writing run.`n$($firstRun.Output)"
-        Assert-True ($firstRun.Output -match [regex]::Escape("Download folder: $firstDownloadRoot")) 'Main script did not honor the custom -DownloadPath.'
-        Assert-True ($firstRun.Output -notmatch 'app folder under your profile') 'Custom -DownloadPath should not trigger fallback messaging.'
-
-        Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixtureRoot 'VideoDownloaderConfig.json'))) 'Main script still wrote config into the install tree.'
-        Assert-True (Test-Path -LiteralPath $firstRun.ConfigPath) 'Main script did not write the config file to the user state directory after -DownloadPath was supplied.'
-
-        $config = Get-Content -LiteralPath $firstRun.ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
-        Assert-True ($config.DownloadPath -eq $firstDownloadRoot) 'Saved config did not contain the expected download path.'
-
-        $secondRun = Invoke-MainScriptRun -FixtureRoot $fixtureRoot -StateRoot $stateRoot -ExpectedDownloadPath $firstDownloadRoot -Url 'https://example.com/video' -HomePath $secondHomeRoot
-        Assert-True ($secondRun.ExitCode -eq 0) "Main script did not reuse the saved config path.`n$($secondRun.Output)"
-        Assert-True ($secondRun.Output -match [regex]::Escape("Using previously saved folder: $firstDownloadRoot")) 'Second run did not announce the saved config folder.'
-        Assert-True ($secondRun.Output -match [regex]::Escape("Download folder: $firstDownloadRoot")) 'Second run did not resolve the saved config folder.'
-    }
-    finally {
-        Remove-TestWorkspace -Path $fixtureRoot
-    }
-}
-
-function Invoke-StaleConfigRecoveryScenario {
-    $fixtureRoot = Copy-SourceFixture -SourceRoot $RootPath -FileNames @('professional-video-downloader.ps1', 'VERSION')
     $homeRoot = Join-Path $fixtureRoot 'home'
-    $stateRoot = Join-Path $fixtureRoot 'state'
+    New-Item -ItemType Directory -Path $firstDownloadRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $homeRoot -Force | Out-Null
-
-    $missingPreference = Join-Path $fixtureRoot 'missing-preference'
     $configPath = Join-Path (Get-AppStateRoot -BasePath $stateRoot) 'VideoDownloaderConfig.json'
-    $expectedDownloadPath = Join-Path (Join-Path $homeRoot 'Professional Video Downloader') 'Downloads'
 
     try {
         New-Item -ItemType Directory -Path (Split-Path -Parent $configPath) -Force | Out-Null
-        @{ DownloadPath = $missingPreference } | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding Ascii
+        @{ DownloadPath = $firstDownloadRoot } | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding Ascii
 
-        $firstRun = Invoke-MainScriptRun -FixtureRoot $fixtureRoot -StateRoot $stateRoot -ExpectedDownloadPath $expectedDownloadPath -Url 'https://example.com/video' -HomePath $homeRoot
-        Assert-True ($firstRun.ExitCode -eq 0) "Main script did not recover from the stale config path.`n$($firstRun.Output)"
-        Assert-True ($firstRun.Output -match [regex]::Escape("Saved folder unavailable: $missingPreference. Using $expectedDownloadPath instead.")) 'Main script did not explain the stale config fallback.'
-        Assert-True ($firstRun.Output -match [regex]::Escape("Download folder: $expectedDownloadPath")) 'Main script did not resolve the effective fallback path.'
-        Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixtureRoot 'VideoDownloaderConfig.json'))) 'Main script still wrote stale-recovery config into the install tree.'
+        $firstRun = Invoke-MainScriptRun -FixtureRoot $fixtureRoot -StateRoot $stateRoot -ExpectedDownloadPath $firstDownloadRoot -Url 'https://example.com/video' -DownloadPathArg $firstDownloadRoot -HomePath $homeRoot
+        Assert-True ($firstRun.ExitCode -eq 0) "Main script did not honor the explicit -DownloadPath override.`n$($firstRun.Output)"
+        Assert-True ($firstRun.Output -match [regex]::Escape("Download folder: $firstDownloadRoot")) 'Main script did not honor the custom -DownloadPath.'
+        Assert-True ((Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json).DownloadPath -eq $firstDownloadRoot) 'Script changed an existing saved path preference.'
 
-        $config = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop | ConvertFrom-Json
-        Assert-True ($config.DownloadPath -eq $expectedDownloadPath) 'Config file did not store the effective fallback path.'
-
-        New-Item -ItemType Directory -Path (Join-Path $homeRoot 'Downloads') -Force | Out-Null
-
-        $secondRun = Invoke-MainScriptRun -FixtureRoot $fixtureRoot -StateRoot $stateRoot -ExpectedDownloadPath $expectedDownloadPath -Url 'https://example.com/video' -HomePath $homeRoot
-        Assert-True ($secondRun.ExitCode -eq 0) "Main script did not reuse the saved fallback path.`n$($secondRun.Output)"
-        Assert-True ($secondRun.Output -match [regex]::Escape("Using previously saved folder: $expectedDownloadPath")) 'Second run did not announce the saved fallback folder.'
-        Assert-True ($secondRun.Output -match [regex]::Escape("Download folder: $expectedDownloadPath")) 'Second run did not resolve the saved fallback folder.'
+        $expectedDefaultPath = Join-Path $homeRoot 'Downloads'
+        $secondRun = Invoke-MainScriptRun -FixtureRoot $fixtureRoot -StateRoot $stateRoot -ExpectedDownloadPath $expectedDefaultPath -Url 'https://example.com/video' -HomePath $homeRoot
+        Assert-True ($secondRun.ExitCode -eq 0) "Main script did not return to the system Downloads folder on the next run.`n$($secondRun.Output)"
+        Assert-True ($secondRun.Output -match [regex]::Escape("Download folder: $expectedDefaultPath")) 'A previously saved path overrode the current system Downloads folder.'
+        Assert-True ($secondRun.Output -notmatch 'Using previously saved folder') 'Main script still read a saved download path preference.'
+        Assert-True ((Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json).DownloadPath -eq $firstDownloadRoot) 'Script modified the legacy saved path preference.'
     }
     finally {
         Remove-TestWorkspace -Path $fixtureRoot
     }
 }
 
-function Invoke-LegacyConfigMigrationScenario {
+function Invoke-DownloadPathCreationFailureScenario {
     $fixtureRoot = Copy-SourceFixture -SourceRoot $RootPath -FileNames @('professional-video-downloader.ps1', 'VERSION')
+    $homeRoot = Join-Path $fixtureRoot 'home-is-a-file'
     $stateRoot = Join-Path $fixtureRoot 'state'
-    $homeRoot = Join-Path $fixtureRoot 'home'
-    New-Item -ItemType Directory -Path $homeRoot -Force | Out-Null
 
-    $legacyConfigPath = Join-Path $fixtureRoot 'VideoDownloaderConfig.json'
-    $currentConfigPath = Join-Path (Get-AppStateRoot -BasePath $stateRoot) 'VideoDownloaderConfig.json'
-    $legacyDownloadPath = Join-Path $fixtureRoot 'legacy-downloads'
+    $expectedDownloadPath = Join-Path $homeRoot 'Downloads'
 
     try {
-        @{ DownloadPath = $legacyDownloadPath } | ConvertTo-Json | Set-Content -LiteralPath $legacyConfigPath -Encoding Ascii
+        New-Item -ItemType File -Path $homeRoot -Force | Out-Null
+        $result = Invoke-MainScriptRun -FixtureRoot $fixtureRoot -StateRoot $stateRoot -ExpectedDownloadPath $expectedDownloadPath -Url 'https://example.com/video' -HomePath $homeRoot
 
-        $firstRun = Invoke-MainScriptRun -FixtureRoot $fixtureRoot -StateRoot $stateRoot -ExpectedDownloadPath $legacyDownloadPath -Url 'https://example.com/video' -HomePath $homeRoot
-        Assert-True ($firstRun.ExitCode -eq 0) "Main script did not migrate the legacy config path.`n$($firstRun.Output)"
-        Assert-True ($firstRun.Output -match [regex]::Escape("Using previously saved folder: $legacyDownloadPath")) 'Main script did not read the legacy config file.'
-        Assert-True (Test-Path -LiteralPath $currentConfigPath) 'Main script did not migrate the legacy config file into the user state directory.'
-
-        $migrated = Get-Content -LiteralPath $currentConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
-        Assert-True ($migrated.DownloadPath -eq $legacyDownloadPath) 'Migrated config did not preserve the legacy download path.'
+        Assert-True ($result.Output -match 'ERROR: Could not create download directory') 'Main script did not report the Downloads folder creation failure.'
+        Assert-True ($result.Output -notmatch 'Starting high-quality download with yt-dlp') 'Main script started a download after failing to create the Downloads folder.'
+        Assert-True (-not (Test-Path -LiteralPath $expectedDownloadPath)) 'Main script created an alternate target instead of failing.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $homeRoot 'Professional Video Downloader'))) 'Main script redirected downloads into its old app-specific fallback folder.'
     }
     finally {
         Remove-TestWorkspace -Path $fixtureRoot
@@ -500,20 +489,17 @@ function Invoke-LegacyConfigMigrationScenario {
 $helperPath = Import-DownloaderHelpers -ScriptPath (Join-Path $RootPath 'professional-video-downloader.ps1')
 . $helperPath
 try {
-    Write-Step 'Positive: helper uses HOME when USERPROFILE is missing'
-    Invoke-HelperPositiveScenario
+    Write-Step 'Platform resolvers use Windows, macOS, Linux XDG, and conventional Downloads locations'
+    Invoke-PlatformResolverScenarios
 
-    Write-Step 'Negative: helper falls back to a predictable writable directory and logs it once'
-    Invoke-HelperFallbackScenario
+    Write-Step 'Positive: -DownloadPath overrides the system folder for one run only'
+    Invoke-PathOverrideScenario
 
-    Write-Step 'Positive: custom -DownloadPath is honored and reused'
-    Invoke-SavedConfigScenario
-
-    Write-Step 'Regression: stale config heals to the effective fallback path and persists it'
-    Invoke-StaleConfigRecoveryScenario
-
-    Write-Step 'Boundary: main script default run creates the fallback folder'
+    Write-Step 'Boundary: main script creates and uses the system Downloads folder'
     Invoke-MainScriptSmokeScenario
+
+    Write-Step 'Negative: main script fails instead of redirecting when Downloads cannot be created'
+    Invoke-DownloadPathCreationFailureScenario
 
     Write-Host '[PASS] Download-folder resolution validation passed.' -ForegroundColor Green
 }

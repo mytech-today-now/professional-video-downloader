@@ -61,6 +61,52 @@ function Remove-TestWorkspace {
     Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+function New-TestYtDlpExecutable {
+    param([Parameter(Mandatory)][string]$RootPath)
+
+    $binPath = Join-Path $RootPath 'fake-yt-dlp-bin'
+    New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        $executablePath = Join-Path $binPath 'yt-dlp.cmd'
+        $scriptText = @'
+@echo off
+if "%~1"=="--version" (
+  >>"%PVD_FAKE_YTDLP_LOG%" echo %*
+  echo %PVD_FAKE_YTDLP_VERSION%
+  exit /b 0
+)
+>>"%PVD_FAKE_YTDLP_LOG%" echo %*
+echo [download] Destination: %PVD_FAKE_DOWNLOAD%\fake.mp4
+exit /b 0
+'@
+    }
+    else {
+        $executablePath = Join-Path $binPath 'yt-dlp'
+        $scriptText = @'
+#!/usr/bin/env pwsh
+if ($args -contains '--version') {
+    Add-Content -LiteralPath $env:PVD_FAKE_YTDLP_LOG -Value ($args -join ' ') -Encoding Ascii
+    [Console]::WriteLine($env:PVD_FAKE_YTDLP_VERSION)
+    exit 0
+}
+Add-Content -LiteralPath $env:PVD_FAKE_YTDLP_LOG -Value ($args -join ' ') -Encoding Ascii
+[Console]::WriteLine('[download] Destination: {0}/fake.mp4' -f $env:PVD_FAKE_DOWNLOAD)
+exit 0
+'@
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($executablePath, ($scriptText -replace "`r`n", "`n"), $utf8NoBom)
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        & chmod +x $executablePath
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Could not mark the fake yt-dlp executable as executable.'
+        }
+    }
+
+    return [pscustomobject]@{ BinPath = $binPath; Path = $executablePath }
+}
+
 function Get-PowerShellHost {
     foreach ($name in @('pwsh.exe', 'pwsh', 'powershell.exe')) {
         $cmd = Get-Command $name -ErrorAction SilentlyContinue
@@ -131,6 +177,7 @@ function Invoke-TestWebRequest {
     [CmdletBinding()]
     param(
         [string]$Uri,
+        [hashtable]$Headers,
         [switch]$UseBasicParsing,
         [int]$TimeoutSec,
         [int]$OperationTimeoutSeconds,
@@ -172,6 +219,7 @@ function global:Invoke-WebRequest {
     [CmdletBinding()]
     param(
         [string]$Uri,
+        [hashtable]$Headers,
         [switch]$UseBasicParsing,
         [int]$TimeoutSec,
         [int]$OperationTimeoutSeconds,
@@ -330,12 +378,20 @@ function global:Invoke-WebRequest {
     [CmdletBinding()]
     param(
         [string]$Uri,
+        [hashtable]$Headers,
         [switch]$UseBasicParsing,
         [int]$TimeoutSec,
         [int]$OperationTimeoutSeconds,
         [int]$MaximumRedirection,
         [string]$OutFile
     )
+
+    if ($Uri -eq 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest') {
+        return [pscustomobject]@{
+            StatusCode = 200
+            Content = '{"tag_name":"2026.08.19","draft":false,"prerelease":false}'
+        }
+    }
 
     $global:WebRequestCount++
     if (-not $webResponseMap.ContainsKey($Uri)) {
@@ -367,15 +423,6 @@ function global:Invoke-WebRequest {
         ContentType = $entry.ContentType
     }
 }
-function global:yt-dlp {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    $global:LASTEXITCODE = 0
-    if ($Args -contains '--version') {
-        Write-Output 'yt-dlp 2026.08.19'
-        return
-    }
-    Write-Output '[download] Destination: __DOWNLOAD__/fake.mp4'
-}
 & '__SCRIPT__' -Url __URL_ARGS__
 Write-Output ("WEBREQUEST_COUNT:{0}" -f $global:WebRequestCount)
 $childExitCodeVar = Get-Variable -Name LASTEXITCODE -Scope 0 -ErrorAction SilentlyContinue
@@ -389,6 +436,15 @@ exit ([int](-not $?))
     $wrapper = $wrapper.Replace('__SCRIPT__', $scriptPath)
     $wrapper = $wrapper.Replace('__URL_ARGS__', $urlLiteral)
     $wrapper = $wrapper.Replace('__DOWNLOAD__', (Join-Path $FixtureRoot 'downloads').Replace("'", "''"))
+    $fakeYtDlp = New-TestYtDlpExecutable -RootPath $FixtureRoot
+    $callLogPath = Join-Path $FixtureRoot 'yt-dlp-calls.log'
+    $environmentPrefix = @"
+`$env:PATH = '$($fakeYtDlp.BinPath.Replace("'", "''"))' + [System.IO.Path]::PathSeparator + `$env:PATH
+`$env:PVD_FAKE_YTDLP_VERSION = 'yt-dlp 2026.08.19'
+`$env:PVD_FAKE_YTDLP_LOG = '$($callLogPath.Replace("'", "''"))'
+`$env:PVD_FAKE_DOWNLOAD = '$(Join-Path $FixtureRoot 'downloads')'
+"@
+    $wrapper = $environmentPrefix + [System.Environment]::NewLine + $wrapper
     Set-Content -LiteralPath $wrapperPath -Value $wrapper -Encoding Ascii
 
     $startArgs = @{
