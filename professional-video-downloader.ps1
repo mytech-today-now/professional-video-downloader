@@ -30,9 +30,7 @@
       Other        : 9GAG, Imgur, Tumblr, Pinterest, LinkedIn, VK, Rutube, Newgrounds.
 
 .VERSION
-    2.0.0   # Major refactor: registry-based platform detection covering 60+ named
-            # sites and 1,800+ via yt-dlp passthrough; DRM/cookie/NSFW advisories;
-            # -CookiesFromBrowser, -AudioOnly, -AllowPlaylist options.
+    1.0.0   # Single source of truth: VERSION file.
 
 .AUTHOR
     Built as a world-class automation solution.
@@ -60,14 +58,20 @@
     -Impersonate to enable this from the first attempt. Requires a recent yt-dlp
     build with curl_cffi support.
 
-    Unquoted & multi-URL input: -Url accepts one or many URLs without quotes.
+    Unquoted multi-URL input: -Url accepts one or many raw URLs without quotes.
+    If a URL contains '&', wrap the raw URL in quotes before passing it.
+    Do not paste Markdown link text like [https://...](...), because PowerShell
+    will treat '&' as the call operator before this script receives the URL.
     Separate URLs with one or more spaces, a comma, a semicolon, and/or newlines.
+    Semicolons inside a single URL stay intact; only semicolons between URLs are
+    treated as list separators.
     Each URL is downloaded in turn, with per-URL retry handling, and a summary is
     printed at the end. Interactive mode prompts for URLs and ends on a blank line.
 
     PowerShell tokenization caveat: a bare URL containing '&' (e.g. YouTube
     'watch?v=X&t=10') must be quoted on the command line because PowerShell
-    treats '&' as the call operator. URLs with '#fragments' are fine unquoted —
+    treats '&' as the call operator. Paste the raw URL, not Markdown link text.
+    URLs with '#fragments' are fine unquoted —
     PowerShell strips the fragment, which yt-dlp ignores anyway.
 
 .USAGE
@@ -87,7 +91,8 @@
 param(
     # Accepts one or many URLs. ValueFromRemainingArguments lets the user pass
     # multiple positional URLs unquoted, separated by spaces. Each element is
-    # then further split on whitespace/comma/semicolon/newline by Expand-UrlList.
+    # then normalized by Expand-UrlList, which preserves valid URL punctuation
+    # and only treats separators as lists when they clearly sit between URLs.
     [Parameter(Position=0, ValueFromRemainingArguments=$true)]
     [Alias('Urls','U')]
     [string[]]$Url,
@@ -112,19 +117,173 @@ param(
     [switch]$AllowPlaylist,
 
     [Parameter()]
-    [switch]$Impersonate
+    [switch]$Impersonate,
+
+    # Keep the console open briefly at exit when a human explicitly wants the
+    # legacy pause behavior. Automation and CI stay fast by default.
+    [Parameter()]
+    [switch]$PauseOnExit
 )
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 
 # ====================== CONFIGURATION & CONSTANTS ======================
-$ScriptVersion = "3.0.0"
+function Get-ProjectVersion {
+    param([Parameter(Mandatory)][string]$RootPath)
+
+    $versionFile = Join-Path $RootPath 'VERSION'
+    if (-not (Test-Path -LiteralPath $versionFile)) {
+        throw "Version file not found: $versionFile"
+    }
+
+    $version = (Get-Content -LiteralPath $versionFile -Raw -ErrorAction Stop).Trim()
+    if (-not $version) {
+        throw "Version file is empty: $versionFile"
+    }
+
+    return $version
+}
+
+function Get-YtDlpVersionInfo {
+    param([Parameter(Mandatory)][string]$VersionText)
+
+    $trimmed = $VersionText.Trim()
+    if (-not $trimmed) {
+        throw 'Unable to determine yt-dlp version from empty output.'
+    }
+
+    $match = [regex]::Match($trimmed, '(?<!\d)(?<core>\d+(?:\.\d+){0,3})(?<suffix>.*)$')
+    if (-not $match.Success) {
+        throw ("Unable to parse yt-dlp version from '{0}'." -f $trimmed)
+    }
+
+    $coreText = $match.Groups['core'].Value
+    $suffix   = $match.Groups['suffix'].Value
+    try {
+        $coreVersion = [version]$coreText
+    }
+    catch {
+        throw ("Unable to parse yt-dlp version from '{0}'." -f $trimmed)
+    }
+
+    return [pscustomobject]@{
+        Raw      = $trimmed
+        CoreText = $coreText
+        Version  = $coreVersion
+        Suffix   = $suffix
+    }
+}
+
+function Assert-YtDlpMinimumVersion {
+    param(
+        [Parameter(Mandatory)][string]$InstalledVersionText,
+        [Parameter(Mandatory)][version]$MinimumVersion,
+        [string]$MinimumVersionText = $MinYtDlpVersionText
+    )
+
+    try {
+        $versionInfo = Get-YtDlpVersionInfo -VersionText $InstalledVersionText
+    }
+    catch {
+        throw ("Unable to determine yt-dlp version from '{0}'. Update yt-dlp with the package manager or pip used to install it, or run 'yt-dlp -U' for standalone release binaries, then rerun the downloader." -f $InstalledVersionText)
+    }
+
+    if ($versionInfo.Version -lt $MinimumVersion -or ($versionInfo.Version -eq $MinimumVersion -and $versionInfo.Suffix)) {
+        throw ("yt-dlp {0} is too old. Minimum required is {1}. Update yt-dlp with the package manager or pip used to install it, or run 'yt-dlp -U' for standalone release binaries, then rerun the downloader." -f $versionInfo.Raw, $MinimumVersionText)
+    }
+
+    return $versionInfo
+}
+
+function Get-YtDlpVersionText {
+    try {
+        $versionText = & yt-dlp --version 2>$null | Select-Object -First 1
+        if ($versionText) {
+            return $versionText.ToString().Trim()
+        }
+    }
+    catch {}
+
+    return 'unknown'
+}
+
+function Get-HomeDirectory {
+    foreach ($root in @($env:HOME, $env:USERPROFILE)) {
+        if (-not [string]::IsNullOrWhiteSpace($root)) {
+            return $root
+        }
+    }
+
+    try {
+        $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        if (-not [string]::IsNullOrWhiteSpace($userProfile)) {
+            return $userProfile
+        }
+    }
+    catch {}
+
+    return [System.IO.Path]::GetTempPath()
+}
+
+function Get-DownloaderStateRoot {
+    $isWinPlatform = ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
+    $isMac = $false
+
+    if (-not $isWinPlatform) {
+        try {
+            $isMac = ((& uname -s 2>$null | Select-Object -First 1).ToString().Trim() -eq 'Darwin')
+        }
+        catch {
+            $isMac = $false
+        }
+    }
+
+    if ($isWinPlatform) {
+        $base = $env:LOCALAPPDATA
+        if ([string]::IsNullOrWhiteSpace($base)) {
+            try {
+                $base = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+            }
+            catch {}
+        }
+        if ([string]::IsNullOrWhiteSpace($base)) {
+            $base = Join-Path (Get-HomeDirectory) 'AppData'
+            $base = Join-Path $base 'Local'
+        }
+    }
+    elseif ($isMac) {
+        $base = Join-Path (Get-HomeDirectory) 'Library'
+        $base = Join-Path $base 'Application Support'
+    }
+    else {
+        $base = $env:XDG_STATE_HOME
+        if ([string]::IsNullOrWhiteSpace($base)) {
+            $base = Join-Path (Get-HomeDirectory) '.local'
+            $base = Join-Path $base 'state'
+        }
+    }
+
+    $base = Join-Path $base 'myTech.Today'
+    return (Join-Path $base 'professional-video-downloader')
+}
+
+$ScriptVersion = Get-ProjectVersion -RootPath $PSScriptRoot
+$MinYtDlpVersion = [version]'2026.08.19'
+$MinYtDlpVersionText = '2026.08.19'
 # Default browser fingerprint used by -Impersonate and by the Cloudflare auto-retry.
 # Requires a recent yt-dlp with curl_cffi (bundled in modern builds).
 $DefaultImpersonateTarget = "chrome"
-$ConfigFile = Join-Path $PSScriptRoot "VideoDownloaderConfig.json"
+$Script:StateRoot = Get-DownloaderStateRoot
+$Script:ConfigFile = Join-Path $Script:StateRoot 'VideoDownloaderConfig.json'
+$Script:LegacyConfigFile = Join-Path $PSScriptRoot 'VideoDownloaderConfig.json'
+$Script:ConfigReadFile = $Script:ConfigFile
 $MaxAttempts = 3
+# Remote batch lists are fetched with explicit guardrails so a slow or oversized
+# endpoint cannot stall the full downloader run.
+$RemoteBatchSourceTimeoutSec = 15
+$RemoteBatchSourceMaxRedirections = 5
+$RemoteBatchSourceMaxBytes = 1MB
 
 # Color constants
 $ColorInfo    = 'Cyan'
@@ -132,6 +291,8 @@ $ColorSuccess = 'Green'
 $ColorWarning = 'Yellow'
 $ColorError   = 'Red'
 $ColorMuted   = 'DarkGray'
+$script:DownloadPathFallbackLogged = $false
+$script:LogFailureWarningShown     = $false
 
 # Curated platform registry. yt-dlp supports 1,800+ sites natively; this table only
 # drives friendly display names and advisory notes. Any well-formed http(s) URL is
@@ -230,6 +391,17 @@ function Write-Colored {
     Write-Host $Message -ForegroundColor $Color
 }
 
+function Invoke-ExitPause {
+    param([int]$Seconds = 4)
+
+    if (-not $script:PauseOnExit) {
+        return
+    }
+
+    Write-Colored ("`nWindow will close in {0} seconds..." -f $Seconds) -Color $ColorInfo
+    Start-Sleep -Seconds $Seconds
+}
+
 function Test-IsHttpUrl {
     # Validates a well-formed http(s) URL with a non-empty host. yt-dlp decides
     # whether the URL is actually extractable; we don't second-guess it here.
@@ -248,31 +420,276 @@ function Test-IsHttpUrl {
 
 function Expand-UrlList {
     # Flattens caller-supplied URL inputs into a deduplicated ordered array.
-    # Accepts any mix of: a single URL, multiple URLs joined by whitespace,
-    # commas, semicolons, or newlines, and array elements containing any of
-    # the above. Empty/whitespace tokens are discarded; order is preserved.
+    # URLs are extracted conservatively so valid punctuation inside a single URL
+    # is preserved. Commas and semicolons only act as separators when they sit
+    # between URL tokens, which keeps paste-friendly list syntax working.
     param([Parameter()][string[]]$Raw)
 
     if (-not $Raw -or $Raw.Count -eq 0) { return @() }
 
-    $combined = ($Raw -join "`n")
-    $tokens   = $combined -split '[\s,;]+' | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() }
-
+    $urlPattern = '(?i)https?://(?:[;,](?!\s*https?://)|[^\s,;])+'
     $seen   = New-Object System.Collections.Generic.HashSet[string] ([System.StringComparer]::OrdinalIgnoreCase)
     $result = [System.Collections.Generic.List[string]]::new()
-    foreach ($t in $tokens) {
-        if ($seen.Add($t)) { [void]$result.Add($t) }
+
+    foreach ($entry in $Raw) {
+        if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+
+        $matches = [regex]::Matches($entry, $urlPattern)
+        if ($matches.Count -eq 0) {
+            foreach ($token in ($entry -split '[\s,;]+')) {
+                $candidate = $token.Trim()
+                if ($candidate -and $seen.Add($candidate)) {
+                    [void]$result.Add($candidate)
+                }
+            }
+            continue
+        }
+
+        foreach ($match in $matches) {
+            $candidate = $match.Value.Trim()
+            if (-not $candidate) { continue }
+
+            if (-not (Test-IsHttpUrl $candidate)) {
+                $trimmed = $candidate.TrimEnd(',', ';')
+                if (Test-IsHttpUrl $trimmed) {
+                    $candidate = $trimmed
+                }
+            }
+
+            if ((Test-IsHttpUrl $candidate) -and $seen.Add($candidate)) {
+                [void]$result.Add($candidate)
+            }
+        }
     }
+
     return ,$result.ToArray()
+}
+
+function Get-RemoteResponseContentType {
+    param([Parameter(Mandatory)]$Response)
+
+    $contentType = $null
+    if ($Response.PSObject.Properties['BaseResponse'] -and $Response.BaseResponse) {
+        $baseResponse = $Response.BaseResponse
+        if ($baseResponse.PSObject.Properties['ContentType'] -and $baseResponse.ContentType) {
+            $contentType = [string]$baseResponse.ContentType
+        }
+    }
+
+    if (-not $contentType -and $Response.PSObject.Properties['Headers'] -and $Response.Headers) {
+        $headerValue = $Response.Headers['Content-Type']
+        if ($headerValue) {
+            $contentType = [string]$headerValue
+        }
+    }
+
+    if (-not $contentType -and $Response.PSObject.Properties['ContentType'] -and $Response.ContentType) {
+        $contentType = [string]$Response.ContentType
+    }
+
+    return $contentType
+}
+
+function Get-RemoteResponseBody {
+    param([Parameter(Mandatory)]$Response)
+
+    if ($Response.PSObject.Properties['Content']) {
+        return [string]$Response.Content
+    }
+
+    return [string]$Response
+}
+
+function Get-InvokeWebRequestTimeoutParameterName {
+    # PowerShell 5.1 exposes -TimeoutSec, while PowerShell 7 uses
+    # -OperationTimeoutSeconds for the same request timeout behavior.
+    $cmd = Get-Command -Name Invoke-WebRequest -CommandType Cmdlet -ErrorAction Stop
+    if ($cmd.Parameters.ContainsKey('OperationTimeoutSeconds')) {
+        return 'OperationTimeoutSeconds'
+    }
+
+    return 'TimeoutSec'
+}
+
+function Test-IsBinaryLikeText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return $false }
+    if ($Text.IndexOf([char]0) -ge 0) { return $true }
+
+    $sampleSize = [Math]::Min($Text.Length, 256)
+    if ($sampleSize -le 0) { return $false }
+
+    $controlCount = 0
+    for ($i = 0; $i -lt $sampleSize; $i++) {
+        $codePoint = [int][char]$Text[$i]
+        if (($codePoint -lt 32 -and $codePoint -notin 9, 10, 13) -or $codePoint -eq 127) {
+            $controlCount++
+        }
+    }
+
+    return ($controlCount -ge 8 -and $controlCount -ge [Math]::Ceiling($sampleSize / 4))
+}
+
+function Test-IsLikelyBatchSourceUrl {
+    param([string]$Token)
+
+    if ([string]::IsNullOrWhiteSpace($Token)) { return $false }
+    if ($Token -notmatch '^(?i)https?://') { return $false }
+
+    if ($Token -match '(?i)\.(txt|list|csv|tsv|md|url|uri|json|xml|m3u|m3u8)(?:[?#].*)?$') {
+        return $true
+    }
+
+    if ($Token -match '(?i)/(raw|content|contents|text|list|lists|urls?|links?|export|paste)(?:/|$|[?#])') {
+        return $true
+    }
+
+    if ($Token -match '(?i)[?&](?:raw|text|output|format|download)=?(?:1|true|text)?(?:&|$)') {
+        return $true
+    }
+
+    return $false
+}
+
+function Get-UrlLikeTokensFromText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
+
+    $tokens = Expand-UrlList -Raw @($Text)
+    $matches = [System.Collections.Generic.List[string]]::new()
+    foreach ($token in $tokens) {
+        if (Test-IsHttpUrl $token) {
+            [void]$matches.Add($token)
+        }
+    }
+
+    return $matches.ToArray()
+}
+
+function Get-BatchSourceProbe {
+    param(
+        [Parameter(Mandatory)][string]$Token,
+        [switch]$ForceRemoteProbe
+    )
+
+    $probe = [pscustomobject]@{
+        Token         = $Token
+        SourceType    = 'Unknown'
+        ShouldProbe   = $false
+        IsBatchSource = $false
+        ContentType   = $null
+        Body          = $null
+        Reason        = $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Token)) {
+        $probe.Reason = 'Token is empty.'
+        return $probe
+    }
+
+    if (Test-Path -LiteralPath $Token -PathType Leaf) {
+        $probe.SourceType = 'LocalFile'
+        $probe.IsBatchSource = $true
+        return $probe
+    }
+
+    if ($Token -notmatch '^(?i)https?://') {
+        $probe.Reason = 'Token is not a local file path or http(s) URL.'
+        return $probe
+    }
+
+    $probe.SourceType = 'RemoteUrl'
+    $probe.ShouldProbe = [bool]($ForceRemoteProbe -or (Test-IsLikelyBatchSourceUrl $Token))
+    if (-not $probe.ShouldProbe) {
+        return $probe
+    }
+
+    $tempFile = $null
+    try {
+        $tempFile = [System.IO.Path]::GetTempFileName()
+        $requestParams = @{
+            Uri                = $Token
+            UseBasicParsing    = $true
+            MaximumRedirection = $RemoteBatchSourceMaxRedirections
+            OutFile            = $tempFile
+            ErrorAction        = 'Stop'
+        }
+        $timeoutParam = Get-InvokeWebRequestTimeoutParameterName
+        $requestParams[$timeoutParam] = $RemoteBatchSourceTimeoutSec
+
+        $resp = Invoke-WebRequest @requestParams
+        $probe.ContentType = Get-RemoteResponseContentType -Response $resp
+
+        if (-not (Test-Path -LiteralPath $tempFile -PathType Leaf)) {
+            $probe.Reason = 'Remote response did not produce a body.'
+            return $probe
+        }
+
+        $fileInfo = Get-Item -LiteralPath $tempFile -ErrorAction Stop
+        if ($fileInfo.Length -gt $RemoteBatchSourceMaxBytes) {
+            $probe.Reason = ("Remote response exceeded the {0:N0} byte limit ({1:N0} bytes)." -f $RemoteBatchSourceMaxBytes, $fileInfo.Length)
+            return $probe
+        }
+
+        $probe.Body = Get-Content -LiteralPath $tempFile -Raw -Encoding UTF8 -ErrorAction Stop
+
+        if ([string]::IsNullOrWhiteSpace($probe.Body)) {
+            $probe.Reason = 'Remote response was empty.'
+            return $probe
+        }
+
+        if (Test-IsBinaryLikeText -Text $probe.Body) {
+            $probe.Reason = 'Remote response looked binary.'
+            return $probe
+        }
+
+        if ($probe.ContentType) {
+            $mediaType = ($probe.ContentType -split ';', 2)[0].Trim().ToLowerInvariant()
+            if ($mediaType -eq 'text/html' -or $mediaType -eq 'application/xhtml+xml') {
+                $probe.Reason = 'Remote response was HTML, not a plain-text URL list.'
+                return $probe
+            }
+        }
+
+        $urlTokens = Get-UrlLikeTokensFromText -Text $probe.Body
+        if ($urlTokens.Count -gt 0) {
+            $probe.IsBatchSource = $true
+            return $probe
+        }
+
+        $probe.Reason = 'Plain-text response did not contain any URL-like tokens.'
+        return $probe
+    }
+    catch {
+        $message = $_.Exception.Message
+        if ($message -match '(?i)timed? out|timeout') {
+            $probe.Reason = ("Remote batch source request timed out after {0} seconds." -f $RemoteBatchSourceTimeoutSec)
+        }
+        elseif ($message -match '(?i)redirection|redirect') {
+            $probe.Reason = ("Remote batch source exceeded the {0} redirect limit." -f $RemoteBatchSourceMaxRedirections)
+        }
+        else {
+            $probe.Reason = "Could not read remote source: $message"
+        }
+        return $probe
+    }
+    finally {
+        if ($tempFile -and (Test-Path -LiteralPath $tempFile)) {
+            Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Read-UrlListInteractive {
     # Reads URLs from the console. Accepts paste-style input: one or more URLs
-    # per line, separated by spaces/commas/semicolons. An empty line terminates
-    # input. If the user pastes a single token that resolves to a file path or
-    # an http(s) URL whose body is text, it is treated as a batch file and the
+    # per line, with space/comma/semicolon separators between URLs. Semicolons
+    # that belong to a single URL are preserved. An empty line terminates input.
+    # If the user pastes a single token that resolves to a file path or an
+    # http(s) URL whose body is text, it is treated as a batch file and the
     # contents are returned in lieu of the raw line.
-    param([string]$Prompt = "Enter one or more URLs (separate by space/comma/semicolon; blank line to finish).`nA local file path or http(s) URL to a text file works too.")
+    param([string]$Prompt = "Enter one or more URLs (space/comma/semicolon lists are supported; semicolons inside a single URL are preserved).`nA local file path or raw http(s) text URL works too.")
 
     Write-Colored $Prompt -Color $ColorInfo
     $lines = [System.Collections.Generic.List[string]]::new()
@@ -280,16 +697,23 @@ function Read-UrlListInteractive {
         $line = Read-Host ">"
         if ([string]::IsNullOrWhiteSpace($line)) { break }
         $trimmed = $line.Trim()
-        if (Test-IsBatchSource $trimmed) {
+        $probe = Get-BatchSourceProbe -Token $trimmed
+        if ($probe.IsBatchSource) {
             try {
-                $fetched = Read-UrlsFromSource -Source $trimmed
+                $fetched = Read-UrlsFromSource -Source $trimmed -Probe $probe
                 foreach ($f in $fetched) { [void]$lines.Add($f) }
                 Write-Colored ("  Loaded {0} token(s) from '{1}'." -f $fetched.Count, $trimmed) -Color $ColorMuted
                 continue
             }
             catch {
-                Write-Colored ("  Could not read '{0}': {1}" -f $trimmed, $_.Exception.Message) -Color $ColorWarning
+                Write-Colored ("  Warning: {0}" -f $_.Exception.Message) -Color $ColorWarning
+                continue
             }
+        }
+        elseif ($probe.ShouldProbe -and $probe.Reason) {
+            Write-Colored ("  Warning: Remote URL '{0}' is not a valid batch source: {1}" -f $trimmed, $probe.Reason) -Color $ColorWarning
+            [void]$lines.Add($line)
+            continue
         }
         [void]$lines.Add($line)
     }
@@ -297,24 +721,32 @@ function Read-UrlListInteractive {
 }
 
 function Test-IsBatchSource {
-    # Detects whether a single user token looks like a file path or an http(s) URL
-    # pointing at a non-video resource (used to decide whether to fetch its body
-    # as a URL list rather than treating it as a download target).
+    # Detects whether a single user token is a local file path or a remote text
+    # URL whose contents contain URL-like tokens.
     param([string]$Token)
-    if ([string]::IsNullOrWhiteSpace($Token)) { return $false }
-    if (Test-Path -LiteralPath $Token -PathType Leaf) { return $true }
-    if ($Token -match '^(?i)https?://.+\.(txt|list|csv|tsv|md)(\?.*)?$') { return $true }
-    return $false
+    $probe = Get-BatchSourceProbe -Token $Token
+    return [bool]$probe.IsBatchSource
 }
 
 function Read-UrlsFromSource {
     # Reads the raw contents of a local file or http(s) URL and returns it as a
     # single-element string array (Expand-UrlList does the actual tokenization).
-    param([Parameter(Mandatory)][string]$Source)
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [psobject]$Probe
+    )
 
     if ($Source -match '^(?i)https?://') {
-        $resp = Invoke-WebRequest -Uri $Source -UseBasicParsing -ErrorAction Stop
-        $body = if ($resp.PSObject.Properties['Content']) { [string]$resp.Content } else { [string]$resp }
+        if (-not $Probe -or $Probe.Token -ne $Source) {
+            $Probe = Get-BatchSourceProbe -Token $Source -ForceRemoteProbe
+        }
+
+        if (-not $Probe.IsBatchSource) {
+            $reason = if ($Probe.Reason) { $Probe.Reason } else { 'Remote response did not contain a usable URL list.' }
+            throw ("Remote URL '{0}' is not a valid batch source: {1}" -f $Source, $reason)
+        }
+
+        $body = if ($Probe.PSObject.Properties['Body'] -and $Probe.Body) { [string]$Probe.Body } else { '' }
         return ,@($body)
     }
 
@@ -352,28 +784,74 @@ function Get-PlatformInfo {
 function Get-PlatformName { param([string]$InputUrl) (Get-PlatformInfo $InputUrl).Name }
 function Is-ValidVideoUrl { param([string]$InputUrl) Test-IsHttpUrl $InputUrl }
 
+function Test-IsWindowsPlatform {
+    return ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
+}
+
+function Get-PredictableDownloadPath {
+    $profileRoot = $null
+    foreach ($root in @($env:USERPROFILE, $env:HOME)) {
+        if (-not [string]::IsNullOrWhiteSpace($root)) {
+            $profileRoot = $root
+            break
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($profileRoot)) {
+        try {
+            $profileRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        }
+        catch {}
+    }
+
+    if ([string]::IsNullOrWhiteSpace($profileRoot)) {
+        $profileRoot = [System.IO.Path]::GetTempPath()
+    }
+
+    return (Join-Path (Join-Path $profileRoot 'Professional Video Downloader') 'Downloads')
+}
+
+function Write-DownloadFallbackNotice {
+    param([Parameter(Mandatory)][string]$FallbackPath)
+
+    if ($script:DownloadPathFallbackLogged) {
+        return
+    }
+
+    $script:DownloadPathFallbackLogged = $true
+    Write-Colored "Downloads folder unavailable. Using app folder under your profile: $FallbackPath" -Color $ColorWarning
+    Write-Log -Level 'WARN' -Message 'Downloads folder fallback selected' -Context @{ path = $FallbackPath }
+}
+
 function Get-DownloadsFolder {
-    # Most reliable cross-Windows method for Downloads folder
-    try {
-        $shell = New-Object -ComObject Shell.Application
-        $downloads = $shell.Namespace('shell:Downloads').Self.Path
-        if ($downloads) { return $downloads }
-    }
-    catch {}
-
-    # Fallbacks
-    $userProfile = $env:USERPROFILE
-    $possible = @(
-        (Join-Path $userProfile "Downloads"),
-        (Join-Path $userProfile "My Downloads"),
-        [Environment]::GetFolderPath("MyVideos")  # fallback
-    )
-
-    foreach ($path in $possible) {
-        if (Test-Path $path) { return $path }
+    $downloads = $null
+    if (Test-IsWindowsPlatform) {
+        try {
+            $shell = New-Object -ComObject Shell.Application
+            $downloads = $shell.Namespace('shell:Downloads').Self.Path
+            if ($downloads -and (Test-Path -LiteralPath $downloads)) {
+                return $downloads
+            }
+        }
+        catch {}
     }
 
-    return Join-Path $userProfile "Downloads"  # final fallback
+    foreach ($root in @($env:USERPROFILE, $env:HOME)) {
+        if (-not [string]::IsNullOrWhiteSpace($root)) {
+            $candidate = Join-Path $root 'Downloads'
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
+        }
+    }
+
+    $fallbackPath = Get-PredictableDownloadPath
+    Write-DownloadFallbackNotice -FallbackPath $fallbackPath
+    if (-not (Test-Path -LiteralPath $fallbackPath)) {
+        New-Item -ItemType Directory -Path $fallbackPath -Force -ErrorAction Stop | Out-Null
+    }
+
+    return $fallbackPath
 }
 
 function Build-YtDlpArgumentList {
@@ -456,13 +934,29 @@ function Invoke-YtDlpDownload {
 }
 
 # ====================== LOGGING ======================
-# Plain-text log per spec: ./logs/YYYY-MM-DD.log next to the script.
-# Logging is always on; the path is resolved via $PSScriptRoot so the script
-# runs in-place wherever install.bat/install.sh placed it.
-$Script:LogDir = Join-Path $PSScriptRoot 'logs'
+# Plain-text log per spec lives under the user-writable app state root.
+$Script:LogDir = Join-Path $Script:StateRoot 'logs'
+
+function Write-LogFailureWarning {
+    param([Parameter(Mandatory)][string]$Reason)
+
+    if ($script:LogFailureWarningShown) {
+        return
+    }
+
+    $script:LogFailureWarningShown = $true
+
+    try {
+        Write-Colored ("Warning: Unable to write log entry. Diagnostics will no longer be recorded for this run. Reason: {0}" -f $Reason) -Color $ColorWarning
+    }
+    catch {
+        # Keep the logger non-throwing even if the warning path itself fails.
+    }
+}
 
 function Write-Log {
-    # Appends one timestamped line to today's log file. Never throws.
+    # Appends one timestamped line to today's log file. Never throws, but
+    # emits one visible warning if logging stops working for this run.
     param(
         [Parameter(Mandatory)][string]$Message,
         [ValidateSet('INFO','WARN','ERROR','DEBUG')][string]$Level = 'INFO',
@@ -485,7 +979,8 @@ function Write-Log {
         [System.IO.File]::AppendAllText($logFile, ($line + [Environment]::NewLine), $utf8NoBom)
     }
     catch {
-        # Never let logging break the run.
+        $reason = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { 'Unknown logging failure' }
+        Write-LogFailureWarning -Reason $reason
     }
 }
 
@@ -495,6 +990,21 @@ Write-Log -Message 'Script started' -Context @{
     cwd       = (Get-Location).Path
     audioOnly = [bool]$AudioOnly
     playlist  = [bool]$AllowPlaylist
+}
+
+if (-not (Test-Path -LiteralPath $Script:ConfigFile) -and (Test-Path -LiteralPath $Script:LegacyConfigFile)) {
+    $Script:ConfigReadFile = $Script:LegacyConfigFile
+    try {
+        $configDir = Split-Path -Parent $Script:ConfigFile
+        if (-not (Test-Path -LiteralPath $configDir)) {
+            New-Item -ItemType Directory -Path $configDir -Force -ErrorAction Stop | Out-Null
+        }
+        Copy-Item -LiteralPath $Script:LegacyConfigFile -Destination $Script:ConfigFile -Force -ErrorAction Stop
+        $Script:ConfigReadFile = $Script:ConfigFile
+    }
+    catch {
+        $Script:ConfigReadFile = $Script:LegacyConfigFile
+    }
 }
 
 # ====================== MAIN SCRIPT ======================
@@ -508,18 +1018,24 @@ Write-Colored "  Other : TED, Pinterest, LinkedIn, VK, Rutube, Imgur, Tumblr, 9G
 Write-Colored "  DRM   : Netflix, Disney+, Hulu, Prime, Paramount+, Apple TV+ (cannot decrypt)`n" -Color $ColorMuted
 
 # --------------------- DOWNLOAD PATH MANAGEMENT ---------------------
+$persistResolvedDownloadPath = $false
+$staleSavedDownloadPath = $null
+
 if (-not $DownloadPath) {
     # Load saved custom path if exists
-    if (Test-Path $ConfigFile) {
+    if (Test-Path -LiteralPath $Script:ConfigReadFile) {
         try {
-            $config = Get-Content $ConfigFile -Raw -ErrorAction Stop | ConvertFrom-Json
+            $config = Get-Content -LiteralPath $Script:ConfigReadFile -Raw -ErrorAction Stop | ConvertFrom-Json
             $savedPath = $null
             if ($config -and $config.PSObject.Properties['DownloadPath']) {
                 $savedPath = $config.DownloadPath
             }
-            if ($savedPath -and (Test-Path $savedPath)) {
+            if ($savedPath -and (Test-Path -LiteralPath $savedPath)) {
                 $DownloadPath = $savedPath
                 Write-Colored "Using previously saved folder: $DownloadPath" -Color $ColorWarning
+            }
+            elseif ($savedPath) {
+                $staleSavedDownloadPath = $savedPath
             }
         }
         catch {}
@@ -532,15 +1048,39 @@ if (-not $DownloadPath) {
 }
 
 # Ensure folder exists
-if (-not (Test-Path $DownloadPath)) {
+if (-not (Test-Path -LiteralPath $DownloadPath)) {
     try {
-        New-Item -Path $DownloadPath -ItemType Directory -Force | Out-Null
+        New-Item -LiteralPath $DownloadPath -ItemType Directory -Force | Out-Null
         Write-Colored "Created download directory: $DownloadPath" -Color $ColorInfo
     }
     catch {
-        Write-Colored "Warning: Could not create folder. Falling back to user profile." -Color $ColorWarning
-        $DownloadPath = $env:USERPROFILE
+        $fallbackPath = Get-PredictableDownloadPath
+        Write-DownloadFallbackNotice -FallbackPath $fallbackPath
+        if (-not (Test-Path -LiteralPath $fallbackPath)) {
+            try {
+                New-Item -ItemType Directory -LiteralPath $fallbackPath -Force -ErrorAction Stop | Out-Null
+            }
+            catch {
+                Write-Colored "ERROR: Could not create fallback download directory: $fallbackPath" -Color $ColorError
+                Write-Log -Level 'ERROR' -Message 'Fallback download directory creation failed' -Context @{ path = $fallbackPath; error = $_.Exception.Message }
+                throw
+            }
+        }
+        $DownloadPath = $fallbackPath
     }
+}
+
+if ($staleSavedDownloadPath) {
+    Write-Colored "Saved folder unavailable: $staleSavedDownloadPath. Using $DownloadPath instead." -Color $ColorWarning
+    $persistResolvedDownloadPath = $true
+}
+
+if ($script:DownloadPathFallbackLogged) {
+    $persistResolvedDownloadPath = $true
+}
+
+if ($PSBoundParameters.ContainsKey('DownloadPath')) {
+    $persistResolvedDownloadPath = $true
 }
 
 Write-Colored "Download folder: $DownloadPath`n" -Color $ColorInfo
@@ -562,7 +1102,7 @@ if ($InputFile) {
     catch {
         Write-Colored "ERROR: Could not read -InputFile '$InputFile': $($_.Exception.Message)" -Color $ColorError
         Write-Log -Level 'ERROR' -Message 'Failed to read -InputFile' -Context @{ source = $InputFile; error = $_.Exception.Message }
-        Start-Sleep -Seconds 3
+        Invoke-ExitPause -Seconds 3
         exit 1
     }
 }
@@ -570,16 +1110,23 @@ if ($InputFile) {
 if ($Url -and $Url.Count -gt 0) {
     foreach ($u in $Url) {
         $trimmed = if ($u) { $u.Trim() } else { '' }
-        if ($trimmed -and (Test-IsBatchSource $trimmed)) {
+        $probe = Get-BatchSourceProbe -Token $trimmed
+        if ($probe.IsBatchSource) {
             try {
-                $fetched = Read-UrlsFromSource -Source $trimmed
+                $fetched = Read-UrlsFromSource -Source $trimmed -Probe $probe
                 foreach ($f in $fetched) { [void]$rawUrlInput.Add($f) }
                 Write-Log -Message 'Loaded URL list from -Url batch source' -Context @{ source = $trimmed }
                 continue
             }
             catch {
-                Write-Colored "Warning: Could not read '$trimmed' as a URL list: $($_.Exception.Message)" -Color $ColorWarning
+                Write-Colored "Warning: $($_.Exception.Message)" -Color $ColorWarning
+                continue
             }
+        }
+        elseif ($probe.ShouldProbe -and $probe.Reason) {
+            Write-Colored ("Warning: Remote URL '{0}' is not a valid batch source: {1}" -f $trimmed, $probe.Reason) -Color $ColorWarning
+            [void]$rawUrlInput.Add($u)
+            continue
         }
         [void]$rawUrlInput.Add($u)
     }
@@ -593,7 +1140,7 @@ if ($rawUrlInput.Count -eq 0) {
         foreach ($l in $lines) { [void]$rawUrlInput.Add($l) }
         if ($rawUrlInput.Count -eq 0) {
             Write-Colored "ERROR: No URL entered ($attempt/$MaxAttempts)" -Color $ColorError
-            Write-Colored "Examples (one per line, or space/comma/semicolon-separated):" -Color $ColorWarning
+            Write-Colored "Examples (one per line, or space/comma/semicolon-separated lists):" -Color $ColorWarning
             Write-Colored "  https://youtube.com/watch?v=..."             -Color $ColorWarning
             Write-Colored "  https://vimeo.com/123456789"                 -Color $ColorWarning
             Write-Colored "  https://www.tiktok.com/@user/video/..."      -Color $ColorWarning
@@ -603,13 +1150,13 @@ if ($rawUrlInput.Count -eq 0) {
     if ($rawUrlInput.Count -eq 0) {
         Write-Colored "Maximum attempts reached. Exiting." -Color $ColorError
         Write-Log -Level 'ERROR' -Message 'No URLs provided after max attempts'
-        Start-Sleep -Seconds 3
+        Invoke-ExitPause -Seconds 3
         exit 1
     }
 }
 
-# Flatten the raw input into individual URL tokens (handles every separator
-# the caller might use: spaces, tabs, commas, semicolons, newlines).
+# Flatten the raw input into individual URL tokens while preserving semicolons
+# and commas that belong to a single URL.
 $allUrls = Expand-UrlList -Raw $rawUrlInput
 
 # Partition into valid http(s) URLs and rejected tokens.
@@ -627,7 +1174,7 @@ if ($rejectedUrl.Count -gt 0) {
 
 if ($urlList.Count -eq 0) {
     Write-Colored "ERROR: No valid http(s) URLs to process." -Color $ColorError
-    Start-Sleep -Seconds 4
+    Invoke-ExitPause -Seconds 4
     exit 1
 }
 
@@ -639,7 +1186,22 @@ if (-not (Get-Command "yt-dlp" -ErrorAction SilentlyContinue)) {
     Write-Colored "`nInstall with:" -Color $ColorWarning
     Write-Colored "   winget install yt-dlp" -Color $ColorInfo
     Write-Colored "Then restart PowerShell and try again." -Color $ColorInfo
-    Start-Sleep -Seconds 6
+    Invoke-ExitPause -Seconds 6
+    exit 1
+}
+
+$ytDlpVersionText = Get-YtDlpVersionText
+try {
+    $null = Assert-YtDlpMinimumVersion -InstalledVersionText $ytDlpVersionText -MinimumVersion $MinYtDlpVersion
+}
+catch {
+    Write-Colored ("ERROR: {0}" -f $_.Exception.Message) -Color $ColorError
+    Write-Log -Level 'ERROR' -Message 'yt-dlp version gate failed' -Context @{
+        version = $ytDlpVersionText
+        minimum = $MinYtDlpVersionText
+    }
+    $global:LASTEXITCODE = 1
+    Invoke-ExitPause -Seconds 6
     exit 1
 }
 
@@ -763,13 +1325,22 @@ foreach ($currentUrl in $urlList) {
 
 Write-Progress -Id 1 -Activity 'Professional Video Downloader' -Completed
 
-# Persist custom path (once, after all URLs have been processed).
-if ($PSBoundParameters.ContainsKey('DownloadPath')) {
-    try { @{ DownloadPath = $DownloadPath } | ConvertTo-Json | Set-Content $ConfigFile -Force } catch {}
+# Persist the effective path when the script had to choose one or when the user
+# explicitly supplied -DownloadPath. This keeps the next run on the same folder
+# and heals stale config entries that pointed at missing locations.
+if ($persistResolvedDownloadPath) {
+    try {
+        $configDir = Split-Path -Parent $Script:ConfigFile
+        if (-not (Test-Path -LiteralPath $configDir)) {
+            New-Item -ItemType Directory -Path $configDir -Force -ErrorAction Stop | Out-Null
+        }
+        @{ DownloadPath = $DownloadPath } | ConvertTo-Json | Set-Content -LiteralPath $Script:ConfigFile -Force
+    }
+    catch {}
 }
 
 # --------------------- SUMMARY ---------------------
-$successCount = ($summary | Where-Object { $_.Success }).Count
+$successCount = @($summary | Where-Object { $_.Success }).Count
 $failureCount = $summary.Count - $successCount
 
 Write-Colored "`n========== SUMMARY ==========" -Color $ColorInfo
@@ -807,6 +1378,5 @@ Write-Log -Message 'Run finished' -Context @{
 }
 
 # --------------------- CLEAN EXIT ---------------------
-Write-Colored "`nWindow will close in 4 seconds..." -Color $ColorInfo
-Start-Sleep -Seconds 4
+Invoke-ExitPause -Seconds 4
 exit ([int]($failureCount -gt 0))

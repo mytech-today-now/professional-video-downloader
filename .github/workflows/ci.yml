@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows-tests:
+    name: PowerShell validation
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Ensure Pester is available
+        shell: pwsh
+        run: |
+          $latest = Get-Module -ListAvailable Pester |
+            Sort-Object Version -Descending |
+            Select-Object -First 1
+
+          if (-not $latest -or $latest.Version.Major -lt 5) {
+            Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck -AllowClobber
+          }
+
+      - name: Run repository validation
+        shell: pwsh
+        run: .\tests\Run-Validation.ps1
+
+  unix-shell:
+    name: POSIX installer syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate install.sh syntax
+        shell: bash
+        run: sh -n install.sh

@@ -1,0 +1,2 @@
+2026-09-20 15:34:27.557 [INFO] [PID 17792] [v1.0.0] Script started [cwd=C:\GitHub\PowerShellScripts\professional-video-downloader, pwsh=7.6.6, audioOnly=False, playlist=False, script=C:\GitHub\PowerShellScripts\professional-video-downloader\professional-video-downloader.ps1]
+2026-09-20 15:49:10.837 [ERROR] [PID 17792] [v1.0.0] No URLs provided after max attempts

@@ -1,0 +1,4 @@
+2026-06-28 19:21:29.734 [INFO] [PID 18340] [v3.0.0] Script started [playlist=False, audioOnly=False, pwsh=7.6.3, cwd=G:\GitHub\PowerShellScripts\professional-video-downloader, script=G:\GitHub\PowerShellScripts\professional-video-downloader\professional-video-downloader.ps1]
+2026-06-28 19:22:03.098 [INFO] [PID 18340] [v3.0.0] Download start [total=1, index=1, url=https://www.facebook.com/reel/1334008518856002, platform=Facebook/Meta]
+2026-06-28 19:22:22.913 [INFO] [PID 18340] [v3.0.0] Download success [url=https://www.facebook.com/reel/1334008518856002, file=C:\Users\kyle_\Downloads\48K_views_2.7K_reactions_I_don_t_agree_that_it_s_not_my_business._See_Abortion_does_not_affect_only_the_person_getting_one_on_our_Substack_-_https_-_ow.ly_nQmM50ZhWmF_Secular_Pro-Life [1334008518856002].f1647448314053899a.m4a]
+2026-06-28 19:22:23.096 [INFO] [PID 18340] [v3.0.0] Run finished [total=1, failed=0, succeeded=1]

@@ -1,0 +1,4 @@
+2026-07-12 17:31:10.587 [INFO] [PID 27068] [v3.0.0] Script started [pwsh=7.6.3, playlist=False, cwd=G:\GitHub\PowerShellScripts\professional-video-downloader, script=G:\GitHub\PowerShellScripts\professional-video-downloader\professional-video-downloader.ps1, audioOnly=False]
+2026-07-12 17:31:22.802 [INFO] [PID 27068] [v3.0.0] Download start [platform=YouTube, total=1, index=1, url=https://www.youtube.com/watch?v=PHL1j2ti420]
+2026-07-12 17:32:25.901 [INFO] [PID 27068] [v3.0.0] Download success [file=C:\Users\kyle_\Downloads\OpenAI_vs_Anthropic_IPOs_Anthropic_3T_Zuck_s_Price_War_China_Ends_Open_Source_Trump_Accounts [PHL1j2ti420].f251.webm, url=https://www.youtube.com/watch?v=PHL1j2ti420]
+2026-07-12 17:32:26.016 [INFO] [PID 27068] [v3.0.0] Run finished [succeeded=1, total=1, failed=0]

@@ -1,0 +1,1990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Professional Video Downloader Pre-Mortem Review</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f1e8;
+      --panel: #fffdf8;
+      --panel-alt: #f8f4ec;
+      --ink: #1f2933;
+      --muted: #5a6673;
+      --accent: #0b5d6e;
+      --accent-2: #8a5a00;
+      --border: #d8d0c2;
+      --shadow: 0 8px 28px rgba(34, 42, 53, 0.08);
+      --core: #8f1d1d;
+      --additional: #8a5a00;
+      --table-head: #1b3345;
+      --table-head-ink: #ffffff;
+      --code-bg: #eef3f6;
+    }
+
+    html {
+      font-size: 16px;
+    }
+
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #fcfbf7 0%, var(--bg) 100%);
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.6;
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    code,
+    pre,
+    table,
+    .pill,
+    .meta {
+      font-family: "Consolas", "Liberation Mono", monospace;
+    }
+
+    .wrap {
+      width: min(1120px, calc(100% - 2rem));
+      margin: 0 auto;
+      padding: 1.25rem 0 3rem;
+    }
+
+    header.hero {
+      padding: 1.5rem 1.5rem 1.25rem;
+      background: rgba(255, 255, 255, 0.78);
+      border: 1px solid var(--border);
+      border-radius: 1.25rem;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(4px);
+    }
+
+    .eyebrow {
+      margin: 0 0 0.35rem;
+      color: var(--accent-2);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4 {
+      line-height: 1.2;
+      margin: 0 0 0.75rem;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 4vw, 3rem);
+      margin-bottom: 0.5rem;
+    }
+
+    h2 {
+      font-size: clamp(1.4rem, 3vw, 2rem);
+      margin-top: 2rem;
+    }
+
+    h3 {
+      font-size: 1.35rem;
+    }
+
+    h4 {
+      font-size: 1rem;
+      margin-top: 1.15rem;
+      margin-bottom: 0.4rem;
+    }
+
+    .lede {
+      margin: 0.5rem 0 0;
+      max-width: 75ch;
+      color: var(--muted);
+      font-size: 1.02rem;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+
+    .stat {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      padding: 0.9rem 1rem;
+    }
+
+    .stat .label {
+      display: block;
+      color: var(--muted);
+      font-size: 0.84rem;
+      margin-bottom: 0.2rem;
+    }
+
+    .stat .value {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .panel {
+      background: rgba(255, 255, 255, 0.76);
+      border: 1px solid var(--border);
+      border-radius: 1.25rem;
+      box-shadow: var(--shadow);
+      margin-top: 1.25rem;
+      padding: 1.25rem;
+    }
+
+    .panel.alt {
+      background: var(--panel-alt);
+    }
+
+    .subtle {
+      color: var(--muted);
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: 1rem;
+      border: 1px solid var(--border);
+      background: #ffffff;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      min-width: 860px;
+      background: #fff;
+    }
+
+    caption {
+      caption-side: top;
+      text-align: left;
+      padding: 0.85rem 1rem 0.55rem;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    th,
+    td {
+      padding: 0.7rem 0.8rem;
+      vertical-align: top;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      background: var(--table-head);
+      color: var(--table-head-ink);
+      text-align: left;
+      font-size: 0.92rem;
+    }
+
+    tbody tr:nth-child(even) {
+      background: #faf7f1;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+      border: 1px solid transparent;
+    }
+
+    .pill.core {
+      color: #ffffff;
+      background: var(--core);
+    }
+
+    .pill.additional {
+      color: #ffffff;
+      background: var(--additional);
+    }
+
+    .pill.high {
+      background: #5b1f1f;
+      color: #fff;
+    }
+
+    .pill.medium {
+      background: #6b4b15;
+      color: #fff;
+    }
+
+    .pill.low {
+      background: #34526b;
+      color: #fff;
+    }
+
+    .issue-list {
+      display: grid;
+      gap: 1rem;
+      margin-top: 0.75rem;
+    }
+
+    article.issue {
+      background: rgba(255, 255, 255, 0.95);
+      border: 1px solid var(--border);
+      border-radius: 1.25rem;
+      box-shadow: var(--shadow);
+      padding: 1rem 1.1rem 1.1rem;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
+    article.issue.core {
+      border-left: 0.45rem solid var(--core);
+    }
+
+    article.issue.additional {
+      border-left: 0.45rem solid var(--additional);
+    }
+
+    .issue-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 0.65rem;
+      margin-bottom: 0.45rem;
+    }
+
+    .issue-id {
+      color: var(--accent);
+      font-size: 0.9rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .issue-tagline {
+      margin: 0;
+      color: var(--muted);
+      max-width: 78ch;
+    }
+
+    .issue-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.6rem;
+      margin: 0.85rem 0 0.2rem;
+    }
+
+    .meta-card {
+      background: #fbf8f2;
+      border: 1px solid var(--border);
+      border-radius: 0.9rem;
+      padding: 0.65rem 0.8rem;
+    }
+
+    .meta-card .label {
+      display: block;
+      color: var(--muted);
+      font-size: 0.76rem;
+      margin-bottom: 0.1rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .meta-card .value {
+      display: block;
+      font-size: 0.94rem;
+      color: var(--ink);
+    }
+
+    pre {
+      margin: 0;
+      padding: 0.9rem 1rem;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 0.9rem;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    ul {
+      margin: 0.35rem 0 0.85rem 1.25rem;
+      padding: 0;
+    }
+
+    li {
+      margin: 0.25rem 0;
+    }
+
+    .footnote {
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    @media (max-width: 820px) {
+      .summary-grid,
+      .issue-meta {
+        grid-template-columns: 1fr;
+      }
+
+      .wrap {
+        width: min(100% - 1rem, 1120px);
+      }
+
+      .panel,
+      article.issue,
+      header.hero {
+        padding-left: 1rem;
+        padding-right: 1rem;
+      }
+
+      table {
+        min-width: 760px;
+      }
+    }
+
+    @media print {
+      body {
+        background: #ffffff;
+      }
+
+      .wrap {
+        width: 100%;
+        padding: 0;
+      }
+
+      header.hero,
+      .panel,
+      article.issue {
+        box-shadow: none;
+        page-break-inside: avoid;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      .table-wrap {
+        overflow: visible;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <p class="eyebrow">Pre-mortem review</p>
+      <h1>Professional Video Downloader</h1>
+      <p class="lede">
+        Static, repository-grounded gap analysis for the current working tree. This report was
+        written from local evidence only, with the repository root, branch, and remote identity
+        observed through Git. It is intended to help another coding agent remediate the highest
+        risk items safely and verify the result.
+      </p>
+      <div class="summary-grid" aria-label="report summary">
+        <div class="stat">
+          <span class="label">Scope</span>
+          <span class="value">Local working tree only</span>
+        </div>
+        <div class="stat">
+          <span class="label">Findings</span>
+          <span class="value">16 total, exactly 10 core and 6 additional</span>
+        </div>
+        <div class="stat">
+          <span class="label">Output path</span>
+          <span class="value"><code>ai-prompts/pre-mortem-2026-09-12-13-13-18.html</code></span>
+        </div>
+      </div>
+    </header>
+
+    <section class="panel" id="scope-notes">
+      <h2>Scope Notes</h2>
+      <ul>
+        <li><strong>Repository identity:</strong> root at <code>C:/GitHub/PowerShellScripts/professional-video-downloader</code>, current branch <code>main</code>, remote <code>origin</code> points at <code>https://github.com/mytech-today-now/professional-video-downloader.git</code>.</li>
+        <li><strong>Inspection basis:</strong> <code>README.md</code>, <code>VERSION</code>, <code>professional-video-downloader.ps1</code>, <code>install-bootstrap.ps1</code>, <code>install.bat</code>, <code>install.sh</code>, and the local file inventory from <code>rg --files</code>.</li>
+        <li><strong>Preserved state:</strong> no application source file was modified while producing this report; the report was added as a new file under <code>ai-prompts/</code>.</li>
+        <li><strong>Validation posture:</strong> this is a pre-mortem, so several items are framed as high-confidence risks or testable assumptions rather than observed runtime failures.</li>
+      </ul>
+    </section>
+
+    <section class="panel alt" id="risk-table">
+      <h2>Prioritized Risk Table</h2>
+      <p class="subtle">Each row maps directly to one issue article below. The first 10 are the core issues; the last 6 are additional high-value items.</p>
+      <div class="table-wrap">
+        <table>
+          <caption>16 issue inventory</caption>
+          <thead>
+            <tr>
+              <th scope="col">Rank</th>
+              <th scope="col">ID</th>
+              <th scope="col">Group</th>
+              <th scope="col">Title</th>
+              <th scope="col">Risk</th>
+              <th scope="col">Primary evidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="risk-row core">
+              <td>1</td>
+              <td><a href="#issue-01">issue-01</a></td>
+              <td><span class="pill core">Core</span></td>
+              <td>Version metadata is split and out of sync</td>
+              <td><span class="pill high">High</span></td>
+              <td><code>professional-video-downloader.ps1:32-35, 122</code>, <code>VERSION:1</code></td>
+            </tr>
+            <tr class="risk-row core">
+              <td>2</td>
+              <td><a href="#issue-02">issue-02</a></td>
+              <td><span class="pill core">Core</span></td>
+              <td>Public install commands stream mutable remote code</td>
+              <td><span class="pill high">High</span></td>
+              <td><code>README.md:10-15</code></td>
+            </tr>
+            <tr class="risk-row core">
+              <td>3</td>
+              <td><a href="#issue-03">issue-03</a></td>
+              <td><span class="pill core">Core</span></td>
+              <td>Chocolatey bootstrap executes an unverified download</td>
+              <td><span class="pill high">High</span></td>
+              <td><code>install-bootstrap.ps1:88-94</code></td>
+            </tr>
+            <tr class="risk-row core">
+              <td>4</td>
+              <td><a href="#issue-04">issue-04</a></td>
+              <td><span class="pill core">Core</span></td>
+              <td>Downloads folder resolution can throw when USERPROFILE is absent</td>
+              <td><span class="pill high">High</span></td>
+              <td><code>professional-video-downloader.ps1:355-377</code></td>
+            </tr>
+            <tr class="risk-row core">
+              <td>5</td>
+              <td><a href="#issue-05">issue-05</a></td>
+              <td><span class="pill core">Core</span></td>
+              <td>Fallback download location can be wrong even on Windows</td>
+              <td><span class="pill high">High</span></td>
+              <td><code>professional-video-downloader.ps1:364-377</code></td>
+            </tr>
+            <tr class="risk-row core">
+              <td>6</td>
+              <td><a href="#issue-06">issue-06</a></td>
+              <td><span class="pill core">Core</span></td>
+              <td>Batch-source detection is extension-only</td>
+              <td><span class="pill high">High</span></td>
+              <td><code>professional-video-downloader.ps1:299-307</code></td>
+            </tr>
+            <tr class="risk-row core">
+              <td>7</td>
+              <td><a href="#issue-07">issue-07</a></td>
+              <td><span class="pill core">Core</span></td>
+              <td>URL tokenization is too aggressive for valid separators</td>
+              <td><span class="pill medium">Medium</span></td>
+              <td><code>professional-video-downloader.ps1:249-266</code></td>
+            </tr>
+            <tr class="risk-row core">
+              <td>8</td>
+              <td><a href="#issue-08">issue-08</a></td>
+              <td><span class="pill core">Core</span></td>
+              <td>Failed batch-source reads fall through as download targets</td>
+              <td><span class="pill medium">Medium</span></td>
+              <td><code>professional-video-downloader.ps1:283-294, 573-584</code></td>
+            </tr>
+            <tr class="risk-row core">
+              <td>9</td>
+              <td><a href="#issue-09">issue-09</a></td>
+              <td><span class="pill core">Core</span></td>
+              <td>Remote batch fetches have no timeout or size guard</td>
+              <td><span class="pill medium">Medium</span></td>
+              <td><code>professional-video-downloader.ps1:310-325</code></td>
+            </tr>
+            <tr class="risk-row core">
+              <td>10</td>
+              <td><a href="#issue-10">issue-10</a></td>
+              <td><span class="pill core">Core</span></td>
+              <td>The declared minimum yt-dlp version is never enforced</td>
+              <td><span class="pill medium">Medium</span></td>
+              <td><code>install-bootstrap.ps1:29-30</code>, <code>install-bootstrap.ps1:133-159</code></td>
+            </tr>
+            <tr class="risk-row additional">
+              <td>11</td>
+              <td><a href="#issue-11">issue-11</a></td>
+              <td><span class="pill additional">Additional</span></td>
+              <td>Pip fallback assumes a bare pip command exists</td>
+              <td><span class="pill medium">Medium</span></td>
+              <td><code>install-bootstrap.ps1:149-155</code></td>
+            </tr>
+            <tr class="risk-row additional">
+              <td>12</td>
+              <td><a href="#issue-12">issue-12</a></td>
+              <td><span class="pill additional">Additional</span></td>
+              <td>The POSIX installer masks package-manager failures</td>
+              <td><span class="pill medium">Medium</span></td>
+              <td><code>install.sh:85-124</code></td>
+            </tr>
+            <tr class="risk-row additional">
+              <td>13</td>
+              <td><a href="#issue-13">issue-13</a></td>
+              <td><span class="pill additional">Additional</span></td>
+              <td>The repo has no automated test or CI safety net</td>
+              <td><span class="pill medium">Medium</span></td>
+              <td><code>rg --files</code> inventory and missing <code>tests/</code> or <code>.github/workflows</code></td>
+            </tr>
+            <tr class="risk-row additional">
+              <td>14</td>
+              <td><a href="#issue-14">issue-14</a></td>
+              <td><span class="pill additional">Additional</span></td>
+              <td>Logging failures are swallowed silently</td>
+              <td><span class="pill low">Low</span></td>
+              <td><code>professional-video-downloader.ps1:464-489</code></td>
+            </tr>
+            <tr class="risk-row additional">
+              <td>15</td>
+              <td><a href="#issue-15">issue-15</a></td>
+              <td><span class="pill additional">Additional</span></td>
+              <td>The generated shortcut is pinned to powershell.exe</td>
+              <td><span class="pill low">Low</span></td>
+              <td><code>install-bootstrap.ps1:205-215</code></td>
+            </tr>
+            <tr class="risk-row additional">
+              <td>16</td>
+              <td><a href="#issue-16">issue-16</a></td>
+              <td><span class="pill additional">Additional</span></td>
+              <td>The script adds a fixed shutdown delay</td>
+              <td><span class="pill low">Low</span></td>
+              <td><code>professional-video-downloader.ps1:630</code>, <code>professional-video-downloader.ps1:810-812</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="core-issues">
+      <h2>Core Issues</h2>
+      <p class="subtle">These are the 10 highest priority findings. They are the first things I would fix before shipping another release.</p>
+
+      <div class="issue-list">
+        <article id="issue-01" class="issue core">
+          <div class="issue-head">
+            <span class="pill core">Core</span>
+            <span class="issue-id">issue-01</span>
+          </div>
+          <h3>Version metadata is split and out of sync</h3>
+          <p class="issue-tagline">The repo advertises more than one version source, and the values currently disagree. That makes release notes, support threads, and installer output harder to trust.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>professional-video-downloader.ps1</code> declares <code>.VERSION 2.0.0</code> at the top and <code>$ScriptVersion = "3.0.0"</code> later in the file, while <code>VERSION</code> contains <code>1.0.0</code>.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">Support, packaging, and troubleshooting all depend on one trustworthy version number. Drift here can make users install the wrong build or report the wrong behavior.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Use the current repository as the source of truth and make versioning single-sourced.
+Choose one authoritative file or field, then generate or update every user-visible version string from it.
+Keep the script header, the runtime banner, the README, and any installer output consistent.
+Add a small validation step that fails when the version values drift instead of letting the repo ship with mismatched numbers.
+Do not change runtime behavior beyond version reporting and related help text.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Assert that the version file and the runtime banner resolve to the same value.</li>
+            <li>Run a smoke invocation that prints the banner and confirm the same version appears in the log line.</li>
+            <li>Verify that a deliberate mismatch causes the new validation to fail fast.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Open the README and confirm any version-specific prose is still accurate.</li>
+            <li>Check the installer banner on Windows and the POSIX path on Linux/macOS for the same version string.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>Exactly one version value is authoritative.</li>
+            <li>No user-visible file prints a conflicting version.</li>
+            <li>The validation step blocks future drift.</li>
+          </ul>
+        </article>
+
+        <article id="issue-02" class="issue core">
+          <div class="issue-head">
+            <span class="pill core">Core</span>
+            <span class="issue-id">issue-02</span>
+          </div>
+          <h3>Public install commands stream mutable remote code</h3>
+          <p class="issue-tagline">The README tells users to pipe a live GitHub raw file into <code>iex</code>. That is convenient, but it also means every install inherits whatever is on the moving branch at that moment.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>README.md:10-15</code> uses <code>iwr</code> / <code>irm</code> piped to <code>iex</code>, and the URL points at <code>refs/heads/main</code> instead of a tagged release or release asset.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">The install path is mutable and unpinned. That creates supply-chain risk, makes installs harder to reproduce, and increases the chance that documentation breaks when the branch moves.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Replace the mutable one-liners in README.md with a release-pinned install flow.
+Prefer a tagged release asset, a versioned raw URL, or a downloaded script that is verified before execution.
+Keep the Windows and cmd examples if they are still supported, but make the install path reproducible and safer to mirror.
+If the repo keeps a one-line bootstrap, document the trust boundary clearly and point it at a stable release artifact, not a live branch.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Verify the documented install URL resolves to a release-specific artifact.</li>
+            <li>Confirm the install path still works after a branch rename or a new commit on main.</li>
+            <li>Check that the published command no longer references a moving branch.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Have a second reviewer follow the docs from a clean machine and confirm the flow is reproducible.</li>
+            <li>Verify the README example matches the actual bootstrap file name and expected arguments.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>The documented install path is pinned to a stable release target.</li>
+            <li>No README example executes a live branch without verification.</li>
+            <li>A future branch change does not break the documented install command.</li>
+          </ul>
+        </article>
+
+        <article id="issue-03" class="issue core">
+          <div class="issue-head">
+            <span class="pill core">Core</span>
+            <span class="issue-id">issue-03</span>
+          </div>
+          <h3>Chocolatey bootstrap executes an unverified download</h3>
+          <p class="issue-tagline">The Windows bootstrapper downloads Chocolatey's install script and immediately feeds it to <code>Invoke-Expression</code>. That is a high-trust action with no checksum, signature, or pinning step.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>install-bootstrap.ps1:88-94</code> calls <code>DownloadString('https://community.chocolatey.org/install.ps1')</code> and passes the result to <code>Invoke-Expression</code>.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">If that network fetch is altered, intercepted, or replaced upstream, the bootstrapper will run arbitrary code as part of the install path.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Refactor Install-Chocolatey so it does not execute raw downloaded text.
+Prefer a pinned bootstrap script that ships with the repo, or verify a downloaded script with a known hash before any execution.
+Keep the existing logging and self-elevation flow, but make the trust boundary explicit and auditable.
+If the bootstrap cannot be verified, fail closed and tell the user how to proceed manually.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Verify the installer refuses to run when the bootstrap hash does not match.</li>
+            <li>Confirm the happy path still installs Chocolatey and refreshes PATH.</li>
+            <li>Check that the failure message identifies the bootstrap verification step.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Run the bootstrap offline and confirm the failure is explicit.</li>
+            <li>Review the resulting transcript or log to ensure the bootstrap source is visible.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>No unverified remote script is executed.</li>
+            <li>Any bootstrap failure is explicit and actionable.</li>
+            <li>The install flow remains idempotent after the change.</li>
+          </ul>
+        </article>
+
+        <article id="issue-04" class="issue core">
+          <div class="issue-head">
+            <span class="pill core">Core</span>
+            <span class="issue-id">issue-04</span>
+          </div>
+          <h3>Downloads folder resolution can throw when USERPROFILE is absent</h3>
+          <p class="issue-tagline">The download-folder helper catches the COM lookup, but not the later <code>Join-Path</code> calls that rely on <code>$env:USERPROFILE</code>. That means the fallback code can fail before it even builds its candidate list.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>professional-video-downloader.ps1:355-377</code> assigns <code>$userProfile = $env:USERPROFILE</code> and immediately calls <code>Join-Path</code>. I also confirmed locally that <code>Join-Path $null 'Downloads'</code> throws a binding error.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">On non-Windows PowerShell sessions, or any environment where <code>USERPROFILE</code> is missing, the script can stop before it reaches the intended fallback path.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Make Get-DownloadsFolder safe when USERPROFILE is missing and when the script runs on non-Windows hosts.
+Guard the Join-Path calls, use HOME or another platform-aware environment variable when appropriate, and avoid COM-specific code on non-Windows systems.
+If Downloads cannot be resolved, choose a predictable writable directory and log the fallback once so the user knows where files will go.
+Do not let the helper throw just because the preferred path is unavailable.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Run the helper with USERPROFILE removed and confirm it still returns a usable path.</li>
+            <li>Run the helper on a non-Windows host or test double and confirm no COM call is attempted.</li>
+            <li>Verify the helper logs the selected fallback path.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Smoke test the main script with no <code>-DownloadPath</code> argument.</li>
+            <li>Confirm the saved config path still resolves on the next run.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>Missing USERPROFILE no longer causes a hard failure.</li>
+            <li>The helper returns a writable path on every supported host.</li>
+            <li>The chosen fallback is visible to the user and to the log.</li>
+          </ul>
+        </article>
+
+        <article id="issue-05" class="issue core">
+          <div class="issue-head">
+            <span class="pill core">Core</span>
+            <span class="issue-id">issue-05</span>
+          </div>
+          <h3>Fallback download location can be wrong even on Windows</h3>
+          <p class="issue-tagline">When the preferred Downloads folder is unavailable, the helper falls back to <code>MyVideos</code> or a plain <code>Downloads</code> path under the profile. That is a surprising destination for a video downloader and can confuse users who expect a download-specific folder.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>professional-video-downloader.ps1:364-377</code> explicitly lists <code>MyVideos</code> as a fallback and returns <code>Join-Path $userProfile "Downloads"</code> as the final default.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">A missing Downloads folder should not silently reroute files into a different library or leave the user guessing where media landed.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Replace the current fallback chain with a clearer, download-centric policy.
+Prefer the actual Downloads folder when present, otherwise create or reuse a dedicated application folder under the user profile and explain the choice in the UI.
+Avoid routing output to Videos unless the user explicitly asked for that location.
+Preserve the config-file behavior, but make the fallback path deterministic and easy to find.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Simulate a missing Downloads folder and verify the helper chooses the new deterministic fallback.</li>
+            <li>Confirm the user-facing message names the exact path.</li>
+            <li>Check that the config file stores the effective path, not the missing preference.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Run with a custom <code>-DownloadPath</code> and confirm the helper does not override it.</li>
+            <li>Smoke test the default run and ensure the chosen folder exists after the invocation.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>No fallback lands in a misleading library folder.</li>
+            <li>The chosen directory is writable and named predictably.</li>
+            <li>The same fallback is used on the next invocation.</li>
+          </ul>
+        </article>
+
+        <article id="issue-06" class="issue core">
+          <div class="issue-head">
+            <span class="pill core">Core</span>
+            <span class="issue-id">issue-06</span>
+          </div>
+          <h3>Batch-source detection is extension-only</h3>
+          <p class="issue-tagline">The code says a single http(s) URL whose body is text should be treated as a batch source, but the detector only recognizes specific file extensions. That misses many real text endpoints.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>professional-video-downloader.ps1:299-307</code> returns true only for local leaf paths or URLs ending in <code>.txt</code>, <code>.list</code>, <code>.csv</code>, <code>.tsv</code>, or <code>.md</code>.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">Raw text endpoints without those suffixes will be misclassified as download targets, which breaks the advertised "paste a URL list" flow.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Teach Test-IsBatchSource to recognize real batch sources by content, not only by extension.
+Keep local file detection as-is, but allow a remote text URL to qualify when the response is plain text and contains URL-like tokens.
+Preserve the current convenience flow while reducing false negatives for raw text endpoints.
+Make the error message clear when the user pastes a URL that is not a valid batch source.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Confirm a raw text endpoint without a list-like suffix is recognized as a batch source.</li>
+            <li>Confirm a normal video URL is still treated as a download target.</li>
+            <li>Confirm a local file path still works in both interactive and <code>-Url</code> modes.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Test a remote list served from a generic endpoint name such as <code>/raw</code> or <code>/content</code>.</li>
+            <li>Verify that an empty or binary response is rejected cleanly.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>Remote text lists do not depend on a file-like suffix.</li>
+            <li>Video URLs are still routed to yt-dlp directly.</li>
+            <li>The user sees one clear message for batch-source failures.</li>
+          </ul>
+        </article>
+
+        <article id="issue-07" class="issue core">
+          <div class="issue-head">
+            <span class="pill core">Core</span>
+            <span class="issue-id">issue-07</span>
+          </div>
+          <h3>URL tokenization is too aggressive for valid separators</h3>
+          <p class="issue-tagline">The list-expansion helper splits on whitespace, commas, and semicolons everywhere. That keeps the convenience syntax simple, but it also means any legitimate token containing a semicolon can be damaged before yt-dlp sees it.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>professional-video-downloader.ps1:249-266</code> uses <code>-split '[\s,;]+'</code> after joining the raw inputs.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">A parsing rule that is too broad can turn a valid URL list into a set of broken tokens, especially for URLs or query strings that already use semicolons.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Narrow Expand-UrlList so it does not split legitimate URL tokens that contain semicolons or other valid URL punctuation.
+Keep the current multi-value convenience, but apply tokenization only when the input is clearly a list or after a caller has already decided the source is batch-like.
+If a separator must stay supported, document it in the prompt and keep the splitter from damaging URL syntax that yt-dlp could otherwise handle.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Verify a batch input with semicolon-delimited entries still expands correctly.</li>
+            <li>Verify a URL that contains semicolon syntax is not split into pieces.</li>
+            <li>Verify whitespace and comma separators still behave as before.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Cover mixed input with one raw URL, one file path, and one batch list.</li>
+            <li>Confirm duplicate removal still preserves the first-seen order.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>Valid URLs are not broken by the tokenization step.</li>
+            <li>Convenient multi-URL input still works.</li>
+            <li>Order and de-duplication remain stable.</li>
+          </ul>
+        </article>
+
+        <article id="issue-08" class="issue core">
+          <div class="issue-head">
+            <span class="pill core">Core</span>
+            <span class="issue-id">issue-08</span>
+          </div>
+          <h3>Failed batch-source reads fall through as download targets</h3>
+          <p class="issue-tagline">If a batch source cannot be read, the code warns the user and then still appends the original token to the download queue. That hides the real error and turns a list-loading problem into a later URL-validation problem.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>professional-video-downloader.ps1:283-294</code> and <code>573-584</code> warn on read failure, then fall through to <code>Add($line)</code> or <code>Add($u)</code> instead of skipping the token.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">A user who pasted a bad list URL or file path will see an invalid-token message later, not the real cause, which makes troubleshooting slower and less trustworthy.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+If Read-UrlsFromSource cannot read a batch source, stop treating that token as a download target.
+Surface the original batch-source error once, skip the token, and continue with any remaining inputs.
+Keep the user experience calm and specific so a list-loading problem does not masquerade as a bad download URL.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Paste an unreadable batch file and confirm it is skipped, not queued as a URL.</li>
+            <li>Paste an unreachable batch URL and confirm the same behavior.</li>
+            <li>Verify the remaining valid URLs still download normally.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Check the interactive prompt path and the <code>-Url</code> path separately.</li>
+            <li>Assert that the error message names the original source exactly once.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>Batch-source read failures do not become fake download attempts.</li>
+            <li>The user sees the real upstream error.</li>
+            <li>Valid items after the failure still proceed.</li>
+          </ul>
+        </article>
+
+        <article id="issue-09" class="issue core">
+          <div class="issue-head">
+            <span class="pill core">Core</span>
+            <span class="issue-id">issue-09</span>
+          </div>
+          <h3>Remote batch fetches have no timeout or size guard</h3>
+          <p class="issue-tagline">The remote-read helper uses <code>Invoke-WebRequest</code> without any explicit timeout or size ceiling. A slow, redirect-heavy, or unexpectedly large endpoint can stall the whole session longer than the user expects.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>professional-video-downloader.ps1:310-325</code> reads remote sources directly with <code>Invoke-WebRequest -ErrorAction Stop</code> and then returns the body.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">The downloader is meant to batch and recover per URL. A single stuck list fetch can undermine that promise and make the run feel frozen.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Add timeout and reasonable size limits to remote batch-file fetches.
+If the remote source is slow, redirects too much, or returns an unexpectedly large body, fail fast with a clear message instead of blocking the whole downloader run.
+Keep local file loading fast, but make the network branch explicit about its limits and failure modes.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Simulate a slow remote endpoint and verify the new timeout fires.</li>
+            <li>Simulate a large text response and verify it is rejected before memory growth becomes a problem.</li>
+            <li>Verify a normal small list still loads successfully.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Check the error text for a network timeout and for an oversize response.</li>
+            <li>Confirm local file lists are unaffected by the new network guardrails.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>Remote batch sources cannot hang the session indefinitely.</li>
+            <li>Oversize text inputs fail with a clear message.</li>
+            <li>Local batch files continue to work unchanged.</li>
+          </ul>
+        </article>
+
+        <article id="issue-10" class="issue core">
+          <div class="issue-head">
+            <span class="pill core">Core</span>
+            <span class="issue-id">issue-10</span>
+          </div>
+          <h3>The declared minimum yt-dlp version is never enforced</h3>
+          <p class="issue-tagline">The bootstrapper defines a minimum yt-dlp version, but the code only logs whatever version it finds. That leaves the script free to continue into feature paths that assume a newer binary than the machine actually has.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>install-bootstrap.ps1:29-30</code> defines <code>$MinYtDlpVersion</code>, but <code>install-bootstrap.ps1:133-159</code> only checks presence and logs the version. No comparison enforces the minimum.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">The downloader relies on newer yt-dlp behavior for cookies, impersonation, and Cloudflare retry flows. A stale binary can fail late and confuse the user.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Enforce the minimum yt-dlp version that the script assumes.
+Compare the installed version against $MinYtDlpVersion before enabling features like impersonation or browser-cookie flows, and stop with an upgrade message when the binary is too old.
+Keep the current install behavior, but make the version gate explicit so the script fails early instead of stumbling into a feature mismatch later.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Stub an older yt-dlp and confirm the installer blocks it with an upgrade message.</li>
+            <li>Stub a supported yt-dlp and confirm the installer proceeds normally.</li>
+            <li>Verify the main script does not attempt unsupported feature flags when the version gate fails.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Check the version comparison logic around prerelease or patch-level strings.</li>
+            <li>Smoke test the version gate in both the bootstrapper and the downloader entry point.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>Older yt-dlp binaries are rejected before use.</li>
+            <li>The user gets one clear upgrade path.</li>
+            <li>Supported versions continue through the install and launch flow.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="additional-issues">
+      <h2>Additional Issues</h2>
+      <p class="subtle">These six are still important, but they are secondary to the core list above.</p>
+
+      <div class="issue-list">
+        <article id="issue-11" class="issue additional">
+          <div class="issue-head">
+            <span class="pill additional">Additional</span>
+            <span class="issue-id">issue-11</span>
+          </div>
+          <h3>Pip fallback assumes a bare pip command exists</h3>
+          <p class="issue-tagline">The Windows bootstrapper falls back to <code>pip install --user --upgrade yt-dlp</code> after trying the package managers. That is brittle because the Python install may expose <code>python.exe</code> without putting <code>pip</code> on PATH.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>install-bootstrap.ps1:149-155</code> calls <code>pip</code> directly and only checks for <code>yt-dlp</code> afterward.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">A common Windows recovery path can fail even when Python is installed, which means the installer has a harder time self-healing in locked-down environments.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Change the pip fallback to use python -m pip or py -m pip instead of relying on a bare pip executable.
+After Python installation, verify that the module runner works before attempting the yt-dlp install.
+Keep the current user-scoped install behavior, but make the fallback resilient when PATH is incomplete.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Simulate a system where <code>python</code> exists but <code>pip</code> is not on PATH.</li>
+            <li>Confirm the fallback still installs yt-dlp through the module runner.</li>
+            <li>Verify the installer reports a clean failure only when Python truly cannot run pip.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Run the fallback with both <code>python</code> and <code>py</code> available.</li>
+            <li>Check that the final PATH refresh still lets the new yt-dlp binary resolve.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>The fallback no longer depends on <code>pip.exe</code> being on PATH.</li>
+            <li>Python-based recovery succeeds on common Windows installs.</li>
+            <li>The install log names the actual runner that was used.</li>
+          </ul>
+        </article>
+
+        <article id="issue-12" class="issue additional">
+          <div class="issue-head">
+            <span class="pill additional">Additional</span>
+            <span class="issue-id">issue-12</span>
+          </div>
+          <h3>The POSIX installer masks package-manager failures</h3>
+          <p class="issue-tagline">The shell installer uses <code>|| true</code> after the package-manager update and install commands. That keeps the script moving, but it also hides why a package operation failed and makes the retry path harder to reason about.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>install.sh:85-124</code> suppresses failures in <code>pm_update</code>, <code>pm_install yt-dlp</code>, and <code>pm_install ffmpeg</code>.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">A user who hits a repo, permission, or network problem will see a later binary check fail, not the real command that broke, which wastes time during troubleshooting.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Stop swallowing package-manager failures in install.sh.
+Capture the exit status of each update and install step, emit a specific error when a command fails, and only fall back to another install path when that path is genuinely available.
+Keep the installer idempotent, but make failures explain themselves instead of disappearing behind || true.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Force a package-manager failure and confirm the script prints the real failing step.</li>
+            <li>Confirm the script still continues to a valid fallback when one exists.</li>
+            <li>Verify a successful package install still reports the expected version checks.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Run the script on at least one apt-based and one brew-based environment.</li>
+            <li>Check that a missing package manager exits before any misleading success message is printed.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>The failing command is visible in the output.</li>
+            <li>Unexpected package-manager errors are not hidden.</li>
+            <li>Successful installs still behave exactly once the environment is healthy.</li>
+          </ul>
+        </article>
+
+        <article id="issue-13" class="issue additional">
+          <div class="issue-head">
+            <span class="pill additional">Additional</span>
+            <span class="issue-id">issue-13</span>
+          </div>
+          <h3>The repo has no automated test or CI safety net</h3>
+          <p class="issue-tagline">The local file inventory does not show a <code>tests/</code> tree or a <code>.github/workflows</code> directory. That means the most important flows are still relying on manual runs and code review alone.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value">The <code>rg --files</code> inventory showed only the source scripts, README, version file, logs, and a shortcut artifact. No formal test suite or CI workflow files were present.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">URL parsing, installer bootstrap behavior, and version gating are exactly the kind of paths that regress quietly unless they are covered by repeatable checks.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Add a minimal automated test harness and CI workflow for the downloader and installers.
+Cover URL validation, list expansion, batch-source detection, argument building, version checks, and the bootstrap/install entry points.
+Keep the tests small and fast, but make them run automatically on every change so the repo is not depending on manual smoke tests alone.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Add Pester tests for the PowerShell helpers and entry points.</li>
+            <li>Add a workflow that exercises the script with <code>pwsh</code> on at least one Windows runner.</li>
+            <li>Cover the installer shell script with a basic syntax or smoke check on a Unix runner.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Validate the README install commands as plain text examples.</li>
+            <li>Run one local smoke invocation for the interactive and batch URL paths.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>At least one automated check runs on each change.</li>
+            <li>Core parser and installer flows have repeatable coverage.</li>
+            <li>Manual testing becomes a backup, not the only gate.</li>
+          </ul>
+        </article>
+
+        <article id="issue-14" class="issue additional">
+          <div class="issue-head">
+            <span class="pill additional">Additional</span>
+            <span class="issue-id">issue-14</span>
+          </div>
+          <h3>Logging failures are swallowed silently</h3>
+          <p class="issue-tagline">The log writer is intentionally defensive, but it suppresses every exception and never tells the operator when diagnostics stop being recorded. That makes a bad disk, bad permission, or broken log path harder to notice.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>professional-video-downloader.ps1:464-489</code> wraps the entire logging write in <code>try</code> / <code>catch</code> and then ignores the error.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">Logs are the main post-run diagnostic trail. If they silently stop working, the next failure becomes much harder to explain and reproduce.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Make Write-Log report at least one visible warning when log creation or append fails.
+Keep the downloader alive, but do not hide repeated logging failures completely; operators need to know when diagnostics are no longer being recorded.
+Preserve the no-throw behavior, but add a bounded warning path so the failure does not disappear into the void.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Point the logger at a read-only or missing directory and confirm one warning appears.</li>
+            <li>Verify the main script still completes even when logging fails.</li>
+            <li>Confirm a healthy log directory still produces the same log line format.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Check that the warning is emitted once, not on every line.</li>
+            <li>Verify the log file still uses the expected daily naming pattern.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>Log failures are visible to the operator.</li>
+            <li>The script still runs to completion when logging breaks.</li>
+            <li>Healthy runs keep the existing log format.</li>
+          </ul>
+        </article>
+
+        <article id="issue-15" class="issue additional">
+          <div class="issue-head">
+            <span class="pill additional">Additional</span>
+            <span class="issue-id">issue-15</span>
+          </div>
+          <h3>The generated shortcut is pinned to powershell.exe</h3>
+          <p class="issue-tagline">The bootstrapper regenerates the <code>.lnk</code> file against <code>powershell.exe</code> even when the installer discovered <code>pwsh</code>. That can leave the shortcut using a different host than the one the install flow just validated.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>install-bootstrap.ps1:205-215</code> sets <code>$sc.TargetPath</code> to <code>powershell.exe</code> and hardcodes the Windows PowerShell icon.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">If the runtime choice matters, the shortcut should reflect that choice. Otherwise users can launch the app through a different host than the one the installer just checked.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Generate the Windows shortcut with the same runtime choice the installer has already validated.
+Prefer pwsh when it is present and confirmed, fall back to powershell.exe only when necessary, and keep the shortcut target in sync with the actual supported host.
+Preserve the existing arguments, working directory, and icon behavior unless they conflict with the chosen host.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Install on a machine with pwsh present and confirm the shortcut target points at pwsh.</li>
+            <li>Install on a machine without pwsh and confirm the fallback still works.</li>
+            <li>Verify the shortcut still launches the correct script with the forwarded arguments.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Inspect the generated <code>.lnk</code> properties with WScript.Shell.</li>
+            <li>Confirm the shortcut remains portable after the repo path changes length.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>The shortcut target matches the validated runtime.</li>
+            <li>Users do not see an unnecessary host mismatch.</li>
+            <li>The shortcut still works after the installer reruns.</li>
+          </ul>
+        </article>
+
+        <article id="issue-16" class="issue additional">
+          <div class="issue-head">
+            <span class="pill additional">Additional</span>
+            <span class="issue-id">issue-16</span>
+          </div>
+          <h3>The script adds a fixed shutdown delay</h3>
+          <p class="issue-tagline">The script sleeps for four seconds both on some failure exits and at the end of a normal run. That is tolerable for a human sitting at the console, but it is unnecessary friction for automation, CI, and scripted use.</p>
+          <div class="issue-meta">
+            <div class="meta-card"><span class="label">Evidence</span><span class="value"><code>professional-video-downloader.ps1:630</code> sleeps after a no-input failure, and <code>professional-video-downloader.ps1:810-812</code> always sleeps before exit.</span></div>
+            <div class="meta-card"><span class="label">Why it matters</span><span class="value">Any unattended invocation pays the delay even when the work is finished and the exit code is already known. That slows test loops and batch jobs for no functional gain.</span></div>
+          </div>
+          <h4>Implementation prompt</h4>
+          <pre>
+You are a senior PowerShell engineer, release reliability specialist, and test automation lead.
+
+## Objective
+Implement the issue described in the article above and preserve unrelated behavior.
+
+## Repository Inspection
+- Read `AGENTS.md`, `README.md`, `VERSION`, `professional-video-downloader.ps1`, `install-bootstrap.ps1`, `install.bat`, and `install.sh` before editing anything.
+- Review the issue title, evidence, acceptance criteria, and surrounding notes in the article above.
+- Inspect nearby helpers, any existing tests, logs, and configuration that help explain the issue.
+- Identify the runtime and test conventions that apply in this repository.
+- Reuse established patterns wherever possible.
+
+## Primary Request
+Remove the unconditional 4-second sleep from normal completion and from empty-input failure paths.
+If a pause is needed for interactive use, make it opt-in or tie it to an interactive host so unattended runs return immediately.
+Keep the exit code and summary output intact, but stop forcing every caller to wait before the process ends.
+
+## Required Work
+1. Confirm the issue using repository evidence from the current tree.
+2. Identify the root cause or design basis and all affected paths.
+3. Make the smallest safe change that completely satisfies the request.
+4. Preserve backward compatibility unless the issue explicitly requires a breaking change.
+5. Add or update tests that cover positive, negative, boundary, and regression behavior.
+6. Run the narrowest relevant validation first, then broaden checks only if they add value.
+7. State any assumptions explicitly only when the repository does not answer the question.
+8. Do not use em dashes in any generated content.
+
+## Validation Workflow
+- Positive path: Prove the requested behavior works.
+- Negative path: Prove invalid, missing, or unsupported inputs fail safely.
+- Boundary and edge cases: Prove limits, duplicates, timeouts, environment differences, or platform differences relevant to the issue.
+- Regression: Add at least one test that would fail on the current implementation and pass after the fix.
+- Include a concise test matrix that maps each acceptance criterion to at least one test.
+- Report every command executed, whether it passed or failed, and any unverified areas.
+- Do not describe unexecuted checks as passing.
+
+## Acceptance Criteria
+- Treat the issue-specific acceptance criteria already documented in the article above as mandatory.
+- Preserve all explicit constraints from the original request.
+- If repository evidence reveals a stronger or more precise requirement, prefer that evidence and update the implementation accordingly.
+
+## Risk and Compatibility Review
+- Preserve unrelated behavior.
+- Keep compatibility with the repository&apos;s supported runtime and installer path.
+- Note any residual risk that cannot be eliminated within scope.
+
+## Final Report
+Return a concise implementation report with outcome, root cause or design basis, files changed, tests added or updated, verification results, remaining risks, and assumptions.
+
+## Constraints
+- Do not invent files, APIs, dependencies, tests, logs, commands, or runtime behavior.
+- Do not add unrelated refactors or scope expansion.
+- Do not weaken, delete, or skip valid tests to make the suite pass.
+- Do not use em dashes in any generated content.
+</pre>
+          <h4>Regression tests</h4>
+          <ul>
+            <li>Run the script non-interactively and confirm it exits immediately after printing the summary.</li>
+            <li>Verify an interactive console can still opt into a pause if that behavior is retained.</li>
+            <li>Check that the exit code still reflects the batch result after the sleep change.</li>
+          </ul>
+          <h4>Additional baseline tests</h4>
+          <ul>
+            <li>Measure the runtime of a clean no-op invocation before and after the fix.</li>
+            <li>Confirm the no-input error path no longer burns time before returning control.</li>
+          </ul>
+          <h4>Acceptance criteria</h4>
+          <ul>
+            <li>Automation no longer pays an unnecessary exit delay.</li>
+            <li>Interactive behavior stays intentional, not accidental.</li>
+            <li>The script still reports its final status cleanly.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <footer class="panel">
+      <h2>Closing Note</h2>
+      <p class="footnote">
+        The issues above are intentionally distinct, sequentially numbered, and grounded in the
+        repository state observed during this review. The first 10 are the highest-priority core
+        risks; the remaining 6 are additional follow-through items that should keep the codebase
+        easier to support and safer to evolve.
+      </p>
+    </footer>
+  </div>
+</body>
+</html>

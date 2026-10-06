@@ -1,0 +1,3 @@
+2026-09-19 19:44:12.100 [INFO] [PID 103036] [v1.0.0] Script started [playlist=False, cwd=C:\GitHub\PowerShellScripts\professional-video-downloader, pwsh=7.6.6, audioOnly=False, script=C:\GitHub\PowerShellScripts\professional-video-downloader\professional-video-downloader.ps1]
+2026-09-19 19:45:03.190 [INFO] [PID 103036] [v1.0.0] Download start [url=https://www.youtube.com/watch?v=M4Czx8EWXb0, total=1, platform=YouTube, index=1]
+2026-09-19 19:45:23.668 [ERROR] [PID 103036] [v1.0.0] Download failed [url=https://www.youtube.com/watch?v=M4Czx8EWXb0, exit_code=1]
